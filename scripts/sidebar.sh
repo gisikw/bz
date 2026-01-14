@@ -7,6 +7,7 @@ CHANNELS=("fort-nix" "exocortex" "wicket" "bz")
 # State file locations
 STATE_FILE="${HOME}/.bz/current"
 ACTIVITY_FILE="${HOME}/.bz/activity"
+IDLE_FILE="${HOME}/.bz/idle"
 
 # Ensure state directory exists
 mkdir -p "${HOME}/.bz"
@@ -35,6 +36,10 @@ has_activity() {
     [[ -f "$ACTIVITY_FILE" ]] && grep -qx "$1" "$ACTIVITY_FILE" 2>/dev/null
 }
 
+has_idle() {
+    [[ -f "$IDLE_FILE" ]] && grep -qx "$1" "$IDLE_FILE" 2>/dev/null
+}
+
 render() {
     # Move to top-left, don't clear (prevents flicker)
     printf '\033[H'
@@ -54,7 +59,10 @@ render() {
             # Current channel - grey background, full width
             printf "${BG_ACTIVE} #%-13s${RESET}\n" "$channel"
         elif has_activity "$channel"; then
-            # Channel with activity - white/bold
+            # Channel with notification - white + hand
+            printf " ${BOLD}#%s${RESET} 🙋\n" "$channel"
+        elif has_idle "$channel"; then
+            # Channel idle/ready - white
             printf " ${BOLD}#%-13s${RESET}\n" "$channel"
         else
             # Other channels - dimmed
@@ -67,15 +75,18 @@ render() {
 render
 last_state=$(cat "$STATE_FILE" 2>/dev/null)
 last_activity=$(cat "$ACTIVITY_FILE" 2>/dev/null || echo "")
+last_idle=$(cat "$IDLE_FILE" 2>/dev/null || echo "")
 
-# Re-render when state or activity changes
+# Re-render when state, activity, or idle changes
 while true; do
     sleep 0.3
     current_state=$(cat "$STATE_FILE" 2>/dev/null)
     current_activity=$(cat "$ACTIVITY_FILE" 2>/dev/null || echo "")
-    if [[ "$current_state" != "$last_state" || "$current_activity" != "$last_activity" ]]; then
+    current_idle=$(cat "$IDLE_FILE" 2>/dev/null || echo "")
+    if [[ "$current_state" != "$last_state" || "$current_activity" != "$last_activity" || "$current_idle" != "$last_idle" ]]; then
         render
         last_state="$current_state"
         last_activity="$current_activity"
+        last_idle="$current_idle"
     fi
 done

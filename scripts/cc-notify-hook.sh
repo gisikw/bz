@@ -5,6 +5,12 @@
 # Read JSON from stdin
 input=$(cat)
 
+# Skip idle_prompt - we handle idle state via Stop hook
+notification_type=$(echo "$input" | jq -r '.notification_type // empty')
+if [[ "$notification_type" == "idle_prompt" ]]; then
+    exit 0
+fi
+
 # Extract cwd from JSON
 cwd=$(echo "$input" | jq -r '.cwd // empty')
 

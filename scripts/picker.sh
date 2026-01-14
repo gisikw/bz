@@ -29,6 +29,7 @@ CHANNELS=("fort-nix" "exocortex" "wicket" "bz")
 STATE_FILE="${HOME}/.bz/current"
 HISTORY_FILE="${HOME}/.bz/history"
 ACTIVITY_FILE="${HOME}/.bz/activity"
+IDLE_FILE="${HOME}/.bz/idle"
 
 # Build MRU-sorted channel list
 # Channels in history come first (most recent at top), then any not in history
@@ -90,10 +91,14 @@ if [[ -n "$selected" ]]; then
         grep -v "^${selected}$" "$HISTORY_FILE" 2>/dev/null || true
     } > "${HISTORY_FILE}.tmp" && mv "${HISTORY_FILE}.tmp" "$HISTORY_FILE"
 
-    # Clear activity for this channel
+    # Clear activity and idle for this channel
     if [[ -f "$ACTIVITY_FILE" ]]; then
         grep -v "^${selected}$" "$ACTIVITY_FILE" > "${ACTIVITY_FILE}.tmp" 2>/dev/null || true
         mv "${ACTIVITY_FILE}.tmp" "$ACTIVITY_FILE"
+    fi
+    if [[ -f "$IDLE_FILE" ]]; then
+        grep -v "^${selected}$" "$IDLE_FILE" > "${IDLE_FILE}.tmp" 2>/dev/null || true
+        mv "${IDLE_FILE}.tmp" "$IDLE_FILE"
     fi
 
     nohup sh -c "sleep 0.1; zellij action go-to-tab-name '$selected'" >/dev/null 2>&1 &
