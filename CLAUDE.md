@@ -1,6 +1,6 @@
 ## Issue Tracking (Beads)
 
-This project uses `bd` (beads) for issue tracking. Run `bd onboard` to get familiar.
+This project uses `bd` (beads) for issue tracking. Run `bd prime` for full workflow context, or `bd onboard` if starting fresh.
 
 ### Quick Reference
 
