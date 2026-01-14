@@ -4,38 +4,61 @@
 
 set -e
 
-# Resolve BZ_ROOT to the project directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve BZ_ROOT to the project directory (follow symlinks)
+SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 export BZ_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Dev mode: restart on quit, Ctrl+q ! to exit loop
+if [[ "${1:-}" == "dev" ]]; then
+    rm -f "${HOME}/.bz/stop-dev"
+    echo "bz dev mode - Ctrl+q Ctrl+q restarts, Ctrl+q Ctrl+x exits"
+    while true; do
+        "$0" || true
+        if [[ -f "${HOME}/.bz/stop-dev" ]]; then
+            rm -f "${HOME}/.bz/stop-dev"
+            echo "Exiting dev mode."
+            exit 0
+        fi
+        echo "Restarting bz..."
+        sleep 0.3
+    done
+fi
 
 # Ensure state directory exists
 mkdir -p "${HOME}/.bz"
 
-# Initialize state if needed
+# Initialize state if needed (preserves previous channel on resume)
 if [[ ! -f "${HOME}/.bz/current" ]]; then
     echo "fort-nix" > "${HOME}/.bz/current"
 fi
 
 # Generate config with expanded paths
 CONFIG_FILE="${HOME}/.bz/config.kdl"
-cat > "$CONFIG_FILE" << 'OUTER'
+cat > "$CONFIG_FILE" << EOF
 // bz zellij config - generated
 keybinds clear-defaults=true {
     normal {
         bind "Ctrl k" {
-OUTER
-cat >> "$CONFIG_FILE" << EOF
-            Run "bash" "-c" "${BZ_ROOT}/scripts/picker.sh" {
-EOF
-cat >> "$CONFIG_FILE" << 'OUTER'
+            Run "${BZ_ROOT}/scripts/picker.sh" {
                 floating true
-                hold_on_close false
             }
         }
+        bind "Ctrl /" {
+            Run "${BZ_ROOT}/scripts/help.sh" {
+                floating true
+            }
+        }
+EOF
+cat >> "$CONFIG_FILE" << 'OUTER'
         bind "Ctrl q" { SwitchToMode "Session"; }
     }
     session {
         bind "Ctrl q" { Quit; }
+        // Ctrl+x = quit dev loop (kill bz, flag tells wrapper to stop)
+        bind "Ctrl x" {
+            Run "bash" "-c" "touch ${HOME}/.bz/stop-dev; pkill -f 'zellij --config.*bz'";
+        }
         bind "Esc" { SwitchToMode "Normal"; }
         bind "Enter" { SwitchToMode "Normal"; }
     }
@@ -51,55 +74,119 @@ cat >> "$CONFIG_FILE" << 'OUTER'
 }
 pane_frames false
 simplified_ui true
-theme "default"
+
+// Muted theme - subtle borders
+themes {
+    bz {
+        fg 204 204 204
+        bg 0 0 0
+        black 40 40 40
+        red 180 100 100
+        green 100 140 100
+        yellow 180 160 100
+        blue 100 130 180
+        magenta 140 100 140
+        cyan 100 160 160
+        white 180 180 180
+        orange 180 130 90
+        // Very subtle frame colors
+        frame_unselected {
+            base 60 60 60
+            background 0 0 0
+            emphasis_0 60 60 60
+            emphasis_1 60 60 60
+            emphasis_2 60 60 60
+            emphasis_3 60 60 60
+        }
+        frame_selected {
+            base 80 80 80
+            background 0 0 0
+            emphasis_0 80 80 80
+            emphasis_1 80 80 80
+            emphasis_2 80 80 80
+            emphasis_3 80 80 80
+        }
+        frame_highlight {
+            base 100 100 100
+            background 0 0 0
+            emphasis_0 100 100 100
+            emphasis_1 100 100 100
+            emphasis_2 100 100 100
+            emphasis_3 100 100 100
+        }
+    }
+}
+theme "bz"
 OUTER
 
 # Generate layout with expanded paths
+# Each workspace attaches to a named tmux session (created if needed)
 LAYOUT_FILE="${HOME}/.bz/layout.kdl"
+CURRENT_CHANNEL=$(cat "${HOME}/.bz/current" 2>/dev/null || echo "fort-nix")
+
+# Helper to add focus=true only for current channel
+focus_if() { [[ "$1" == "$CURRENT_CHANNEL" ]] && echo "focus=true" || echo ""; }
+
 cat > "$LAYOUT_FILE" << EOF
 // bz layout - generated
 layout {
-    tab name="fort-nix" focus=true cwd="/home/dev/Projects/fort-nix" {
+    tab name="fort-nix" $(focus_if fort-nix) {
         pane split_direction="vertical" {
             pane size=16 borderless=true name="sidebar" {
                 command "bash"
                 args "-c" "${BZ_ROOT}/scripts/sidebar.sh"
             }
-            pane name="workspace" focus=true
+            pane size=1 borderless=true
+            pane name="workspace" focus=true {
+                command "tmux"
+                args "new-session" "-A" "-s" "bz-fort-nix" "-c" "/home/dev/Projects/fort-nix"
+            }
         }
     }
 
-    tab name="exocortex" cwd="/home/dev/Projects/exocortex" {
+    tab name="exocortex" $(focus_if exocortex) {
         pane split_direction="vertical" {
             pane size=16 borderless=true name="sidebar" {
                 command "bash"
                 args "-c" "${BZ_ROOT}/scripts/sidebar.sh"
             }
-            pane name="workspace" focus=true
+            pane size=1 borderless=true
+            pane name="workspace" focus=true {
+                command "tmux"
+                args "new-session" "-A" "-s" "bz-exocortex" "-c" "/home/dev/Projects/exocortex"
+            }
         }
     }
 
-    tab name="wicket" cwd="/home/dev/Projects/wicket" {
+    tab name="wicket" $(focus_if wicket) {
         pane split_direction="vertical" {
             pane size=16 borderless=true name="sidebar" {
                 command "bash"
                 args "-c" "${BZ_ROOT}/scripts/sidebar.sh"
             }
-            pane name="workspace" focus=true
+            pane size=1 borderless=true
+            pane name="workspace" focus=true {
+                command "tmux"
+                args "new-session" "-A" "-s" "bz-wicket" "-c" "/home/dev/Projects/wicket"
+            }
         }
     }
 
-    tab name="bz" cwd="/home/dev/Projects/bz" {
+    tab name="bz" $(focus_if bz) {
         pane split_direction="vertical" {
             pane size=16 borderless=true name="sidebar" {
                 command "bash"
                 args "-c" "${BZ_ROOT}/scripts/sidebar.sh"
             }
-            pane name="workspace" focus=true
+            pane size=1 borderless=true
+            pane name="workspace" focus=true {
+                command "tmux"
+                args "new-session" "-A" "-s" "bz-bz" "-c" "/home/dev/Projects/bz"
+            }
         }
     }
 }
 EOF
 
-# Launch zellij
-exec zellij --config "$CONFIG_FILE" --layout "$LAYOUT_FILE"
+# Launch zellij, overwrite goodbye message
+zellij --config "$CONFIG_FILE" --layout "$LAYOUT_FILE"; printf '\033[1A\033[2K'

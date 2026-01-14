@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
 # bz sidebar - displays channel list with current channel highlighted
 
-set -e
-
 # Channel list (hardcoded for now)
 CHANNELS=("fort-nix" "exocortex" "wicket" "bz")
 
 # State file location
-STATE_DIR="${HOME}/.bz"
-STATE_FILE="${STATE_DIR}/current"
+STATE_FILE="${HOME}/.bz/current"
 
 # Ensure state directory exists
-mkdir -p "$STATE_DIR"
+mkdir -p "${HOME}/.bz"
 
 # Initialize state file if it doesn't exist
 if [[ ! -f "$STATE_FILE" ]]; then
@@ -22,36 +19,51 @@ fi
 BOLD='\033[1m'
 DIM='\033[2m'
 RESET='\033[0m'
+HIDE_CURSOR='\033[?25l'
+SHOW_CURSOR='\033[?25h'
+
+# Hide cursor for cleaner look
+printf "$HIDE_CURSOR"
+trap "printf '$SHOW_CURSOR'" EXIT
+
+# Clear screen once at start
+printf '\033[2J'
 
 render() {
-    # Clear screen and move to top
-    printf '\033[2J\033[H'
+    # Move to top-left, don't clear (prevents flicker)
+    printf '\033[H'
 
     # Read current channel
     local current
     current=$(cat "$STATE_FILE" 2>/dev/null || echo "fort-nix")
 
-    # Print header with some padding
-    echo ""
+    # Header
+    printf '\n'
+    printf " ${DIM}CHANNELS${RESET}\n"
+    printf '\n'
 
     # Print each channel
     for channel in "${CHANNELS[@]}"; do
         if [[ "$channel" == "$current" ]]; then
-            # Current channel - bold with indicator
-            printf " ${BOLD}#%s${RESET}\n" "$channel"
+            # Current channel - bold
+            printf " ${BOLD}#%-12s${RESET}\n" "$channel"
         else
             # Other channels - dimmed
-            printf " ${DIM}#%s${RESET}\n" "$channel"
+            printf " ${DIM}#%-12s${RESET}\n" "$channel"
         fi
     done
 }
 
 # Initial render
 render
+last_state=$(cat "$STATE_FILE" 2>/dev/null)
 
-# Watch for changes and re-render
-# Using a simple poll since inotifywait may not be available
+# Only re-render when state changes
 while true; do
-    sleep 0.5
-    render
+    sleep 0.3
+    current_state=$(cat "$STATE_FILE" 2>/dev/null)
+    if [[ "$current_state" != "$last_state" ]]; then
+        render
+        last_state="$current_state"
+    fi
 done
