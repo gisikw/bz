@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# bz - multi-agent coordination TUI
+# Pronounced "busy"
+
+set -e
+
+# Resolve BZ_ROOT to the project directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export BZ_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Ensure state directory exists
+mkdir -p "${HOME}/.bz"
+
+# Initialize state if needed
+if [[ ! -f "${HOME}/.bz/current" ]]; then
+    echo "fort-nix" > "${HOME}/.bz/current"
+fi
+
+# Generate config with expanded paths
+CONFIG_FILE="${HOME}/.bz/config.kdl"
+cat > "$CONFIG_FILE" << 'OUTER'
+// bz zellij config - generated
+keybinds clear-defaults=true {
+    normal {
+        bind "Ctrl k" {
+OUTER
+cat >> "$CONFIG_FILE" << EOF
+            Run "bash" "-c" "${BZ_ROOT}/scripts/picker.sh" {
+EOF
+cat >> "$CONFIG_FILE" << 'OUTER'
+                floating true
+                hold_on_close false
+            }
+        }
+        bind "Ctrl q" { SwitchToMode "Session"; }
+    }
+    session {
+        bind "Ctrl q" { Quit; }
+        bind "Esc" { SwitchToMode "Normal"; }
+        bind "Enter" { SwitchToMode "Normal"; }
+    }
+    locked {}
+    pane {}
+    tab {}
+    resize {}
+    move {}
+    search {}
+    scroll {}
+    renametab {}
+    renamepane {}
+}
+pane_frames false
+simplified_ui true
+theme "default"
+OUTER
+
+# Generate layout with expanded paths
+LAYOUT_FILE="${HOME}/.bz/layout.kdl"
+cat > "$LAYOUT_FILE" << EOF
+// bz layout - generated
+layout {
+    tab name="fort-nix" focus=true cwd="/home/dev/Projects/fort-nix" {
+        pane split_direction="vertical" {
+            pane size=16 borderless=true name="sidebar" {
+                command "bash"
+                args "-c" "${BZ_ROOT}/scripts/sidebar.sh"
+            }
+            pane name="workspace" focus=true
+        }
+    }
+
+    tab name="exocortex" cwd="/home/dev/Projects/exocortex" {
+        pane split_direction="vertical" {
+            pane size=16 borderless=true name="sidebar" {
+                command "bash"
+                args "-c" "${BZ_ROOT}/scripts/sidebar.sh"
+            }
+            pane name="workspace" focus=true
+        }
+    }
+
+    tab name="wicket" cwd="/home/dev/Projects/wicket" {
+        pane split_direction="vertical" {
+            pane size=16 borderless=true name="sidebar" {
+                command "bash"
+                args "-c" "${BZ_ROOT}/scripts/sidebar.sh"
+            }
+            pane name="workspace" focus=true
+        }
+    }
+
+    tab name="bz" cwd="/home/dev/Projects/bz" {
+        pane split_direction="vertical" {
+            pane size=16 borderless=true name="sidebar" {
+                command "bash"
+                args "-c" "${BZ_ROOT}/scripts/sidebar.sh"
+            }
+            pane name="workspace" focus=true
+        }
+    }
+}
+EOF
+
+# Launch zellij
+exec zellij --config "$CONFIG_FILE" --layout "$LAYOUT_FILE"
