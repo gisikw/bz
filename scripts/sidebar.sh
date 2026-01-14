@@ -4,8 +4,9 @@
 # Channel list (hardcoded for now)
 CHANNELS=("fort-nix" "exocortex" "wicket" "bz")
 
-# State file location
+# State file locations
 STATE_FILE="${HOME}/.bz/current"
+ACTIVITY_FILE="${HOME}/.bz/activity"
 
 # Ensure state directory exists
 mkdir -p "${HOME}/.bz"
@@ -30,6 +31,10 @@ trap "printf '$SHOW_CURSOR'" EXIT
 # Clear screen once at start
 printf '\033[2J'
 
+has_activity() {
+    [[ -f "$ACTIVITY_FILE" ]] && grep -qx "$1" "$ACTIVITY_FILE" 2>/dev/null
+}
+
 render() {
     # Move to top-left, don't clear (prevents flicker)
     printf '\033[H'
@@ -48,6 +53,9 @@ render() {
         if [[ "$channel" == "$current" ]]; then
             # Current channel - grey background, full width
             printf "${BG_ACTIVE} #%-13s${RESET}\n" "$channel"
+        elif has_activity "$channel"; then
+            # Channel with activity - white/bold
+            printf " ${BOLD}#%-13s${RESET}\n" "$channel"
         else
             # Other channels - dimmed
             printf " ${DIM}#%-13s${RESET}\n" "$channel"
@@ -58,13 +66,16 @@ render() {
 # Initial render
 render
 last_state=$(cat "$STATE_FILE" 2>/dev/null)
+last_activity=$(cat "$ACTIVITY_FILE" 2>/dev/null || echo "")
 
-# Only re-render when state changes
+# Re-render when state or activity changes
 while true; do
     sleep 0.3
     current_state=$(cat "$STATE_FILE" 2>/dev/null)
-    if [[ "$current_state" != "$last_state" ]]; then
+    current_activity=$(cat "$ACTIVITY_FILE" 2>/dev/null || echo "")
+    if [[ "$current_state" != "$last_state" || "$current_activity" != "$last_activity" ]]; then
         render
         last_state="$current_state"
+        last_activity="$current_activity"
     fi
 done
