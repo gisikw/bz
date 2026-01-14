@@ -1,6 +1,27 @@
 #!/usr/bin/env bash
 # bz channel picker - minimal fzf-based channel switcher
 
+# Prevent re-triggering while already open
+LOCK_FILE="${HOME}/.bz/picker.lock"
+if [[ -f "$LOCK_FILE" ]]; then
+    zellij action close-pane
+    exit 0
+fi
+touch "$LOCK_FILE"
+trap "rm -f '$LOCK_FILE'" EXIT
+
+# Resize floating pane to be compact and unpin it
+if [[ -n "$ZELLIJ_PANE_ID" ]]; then
+    zellij action change-floating-pane-coordinates \
+        --pane-id "$ZELLIJ_PANE_ID" \
+        --width 70 --height 8 \
+        --x "40%" --y "30%" \
+        --pinned false
+fi
+
+# Set terminal background to grey and clear screen
+printf '\033[48;5;237m\033[2J\033[H'
+
 # Channel list (hardcoded for now)
 CHANNELS=("fort-nix" "exocortex" "wicket" "bz")
 
@@ -45,13 +66,14 @@ selected=$(get_sorted_channels | sed 's/^/#/' | fzf \
     --no-info \
     --no-separator \
     --no-scrollbar \
+    --no-header \
     --border=none \
-    --margin=0 \
+    --margin=0,1 \
     --padding=0 \
     --height=6 \
     --layout=reverse \
     --bind="load:down,tab:accept,enter:accept,esc:abort" \
-    --color=bg+:-1,pointer:white,prompt:dim \
+    --color=bg:237,bg+:237,pointer:white,prompt:dim \
     2>/dev/null) || true
 
 # Strip # prefix from selection
