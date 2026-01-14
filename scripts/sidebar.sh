@@ -19,6 +19,7 @@ fi
 BOLD='\033[1m'
 DIM='\033[2m'
 RESET='\033[0m'
+BG_ACTIVE='\033[48;5;237m'  # Dark grey background
 HIDE_CURSOR='\033[?25l'
 SHOW_CURSOR='\033[?25h'
 
@@ -42,14 +43,14 @@ render() {
     printf " ${DIM}CHANNELS${RESET}\n"
     printf '\n'
 
-    # Print each channel
+    # Print each channel (sidebar is 16 chars wide)
     for channel in "${CHANNELS[@]}"; do
         if [[ "$channel" == "$current" ]]; then
-            # Current channel - bold
-            printf " ${BOLD}#%-12s${RESET}\n" "$channel"
+            # Current channel - grey background, full width
+            printf "${BG_ACTIVE} #%-13s${RESET}\n" "$channel"
         else
             # Other channels - dimmed
-            printf " ${DIM}#%-12s${RESET}\n" "$channel"
+            printf " ${DIM}#%-13s${RESET}\n" "$channel"
         fi
     done
 }
