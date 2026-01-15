@@ -33,7 +33,10 @@ These must render correctly:
 - iamb (ratatui-based Matrix client)
 - OpenCode (bubbletea-based)
 - vim/neovim (alternate screen, mouse support)
+- tmux (nested multiplexer for session persistence within channels)
 - Standard shells (bash, zsh, fish)
+
+Mouse/cursor support is required — smooth channel-surfing on mobile depends on it.
 
 ### Non-Negotiables
 
@@ -51,10 +54,8 @@ Each channel owns one or more PTY sessions. A channel is the unit of "attention"
 Channel {
     id: ChannelId,
     name: String,
-    ptys: Vec<Pty>,
-    focused_pty: usize,
-    has_activity: bool,
-    has_bell: bool,
+    ptys: HashMap<PtyId, Pty>,
+    focused_pty: PtyId,
 }
 ```
 
@@ -64,13 +65,27 @@ Each PTY wraps a child process and feeds output through vt100 for parsing.
 
 ```
 Pty {
+    id: PtyId,
     child: Child,
     parser: vt100::Parser,
-    has_unread_output: bool,
+    activity: ActivityState,
+}
+
+enum ActivityState {
+    Idle,                    // No unread activity
+    Active(u32),             // Unread output, with notification count
+    AwaitingInput,           // Agent waiting on user (e.g., Claude Code prompt)
 }
 ```
 
-The bz event loop reads from all PTYs (via polling/async), updates parser state, and sets activity flags.
+The `Active(u32)` count aggregates notification-worthy events:
+- Each bell (`\x07`) increments the count
+- Future: @-mentions parsed from terminal output could increment
+- Future: Claude Code "waiting for input" detection sets `AwaitingInput`
+
+This model supports richer sidebar UI later (badge counts, different icons for waiting-on-user vs background activity) without requiring schema changes.
+
+The bz event loop reads from all PTYs (via polling/async), updates parser state, and updates activity.
 
 ### Input Routing
 
@@ -92,11 +107,13 @@ Sidebar::render(channels: &[Channel], focused: ChannelId) → Widget
 ### Activity Detection Contract
 
 When bytes arrive from a PTY that is not currently focused:
-1. Set `channel.has_activity = true`
-2. If bytes contain `\x07`, also set `channel.has_bell = true`
+1. If `activity` is `Idle`, transition to `Active(0)`
+2. If bytes contain `\x07` (bell), increment the count in `Active(n)` → `Active(n+1)`
 
 When channel becomes focused:
-1. Clear `has_activity` and `has_bell`
+1. Reset all PTY activity states in that channel to `Idle`
+
+Sidebar aggregates activity across all PTYs in a channel for display (sum of counts, highest-priority state wins for icon).
 
 ## Alternatives
 
@@ -174,16 +191,14 @@ Existing proofs of concept (mprocs, ratterm) demonstrate this is achievable.
 2. **Embedding iamb as library** — Run it as subprocess via PTY like everything else.
 3. **Custom chat protocol** — Use Matrix (iamb) for chat, not our own thing.
 
+## Decisions
+
+1. **Leader key**: `Ctrl+B` (configurable later, out of scope for v1)
+2. **Async runtime**: tokio (standard-of-care for Rust async)
+3. **Config format**: TOML
+4. **Scrollback**: Out of scope — users can run tmux inside channels for scrollback
+5. **Persona supervisor**: Out of scope — not spawning agents yet
+
 ## Open Questions
 
-1. **Leader key choice** — What's the least conflicting option? `Ctrl+Space`? `Ctrl+B`? Configurable?
-
-2. **tui-term maturity** — Is it production-ready or do we vendor/fork vt100 directly?
-
-3. **Async runtime** — tokio? async-std? smol? Need to read from multiple PTYs concurrently.
-
-4. **Scrollback strategy** — vt100 provides it, but how do we expose scroll mode UX?
-
-5. **Config format** — TOML? KDL? Where do channel definitions live?
-
-6. **Persona supervisor integration** — How does bz communicate with the persona supervisor? Unix socket? Embedded?
+1. **tui-term maturity** — Is it production-ready or do we use portable-pty + vt100 directly? Needs investigation during M1.
