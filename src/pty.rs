@@ -36,8 +36,21 @@ pub struct Pty {
 }
 
 impl Pty {
-    /// Spawn a new PTY with the user's default shell
-    pub fn spawn(id: usize, rows: u16, cols: u16) -> Result<Self> {
+    /// Spawn a new PTY with the given command
+    ///
+    /// # Arguments
+    /// * `id` - Unique identifier for this PTY
+    /// * `rows` - Terminal height
+    /// * `cols` - Terminal width
+    /// * `command` - Command to run (e.g., "bash", "zsh")
+    /// * `cwd` - Optional working directory
+    pub fn spawn(
+        id: usize,
+        rows: u16,
+        cols: u16,
+        command: &str,
+        cwd: Option<&str>,
+    ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -48,8 +61,10 @@ impl Pty {
             })
             .map_err(|e| color_eyre::eyre::eyre!("Failed to open PTY: {}", e))?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".into());
-        let cmd = CommandBuilder::new(shell);
+        let mut cmd = CommandBuilder::new(command);
+        if let Some(dir) = cwd {
+            cmd.cwd(dir);
+        }
         let _child = pair
             .slave
             .spawn_command(cmd)

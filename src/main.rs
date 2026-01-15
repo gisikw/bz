@@ -1,3 +1,5 @@
+mod channel;
+mod config;
 mod pty;
 
 use std::io::{self, stdout};
@@ -19,66 +21,75 @@ use ratatui::{
 };
 use tui_term::widget::PseudoTerminal;
 
-use crate::pty::{ActivityState, Pty};
+use crate::channel::Channel;
+use crate::config::Config;
+use crate::pty::ActivityState;
 
 /// Application state
 struct App {
-    /// All PTY instances
-    ptys: Vec<Pty>,
-    /// Index of the currently focused PTY
+    /// All channels
+    channels: Vec<Channel>,
+    /// Index of the currently focused channel
     focused: usize,
 }
 
 impl App {
-    /// Create a new app with the given number of PTYs
-    fn new(count: usize, rows: u16, cols: u16) -> Result<Self> {
-        let mut ptys = Vec::with_capacity(count);
-        for id in 0..count {
-            ptys.push(Pty::spawn(id, rows, cols)?);
+    /// Create app from configuration
+    fn from_config(config: &Config, rows: u16, cols: u16) -> Result<Self> {
+        use crate::pty::Pty;
+
+        let mut channels = Vec::with_capacity(config.channel.len());
+        for (id, ch_config) in config.channel.iter().enumerate() {
+            let pty = Pty::spawn(
+                id,
+                rows,
+                cols,
+                &ch_config.command,
+                ch_config.cwd.as_deref(),
+            )?;
+            channels.push(Channel::new(id, ch_config.name.clone(), pty));
         }
-        Ok(Self { ptys, focused: 0 })
+        Ok(Self {
+            channels,
+            focused: 0,
+        })
     }
 
-    /// Get mutable reference to the focused PTY
-    fn focused_pty(&mut self) -> &mut Pty {
-        &mut self.ptys[self.focused]
+    /// Get mutable reference to the focused channel
+    fn focused_channel(&mut self) -> &mut Channel {
+        &mut self.channels[self.focused]
     }
 
-    /// Process output from all PTYs
+    /// Process output from all channels
     fn process_all_output(&mut self) {
         let focused = self.focused;
-        for (i, pty) in self.ptys.iter_mut().enumerate() {
-            pty.process_output(i == focused);
+        for (i, channel) in self.channels.iter_mut().enumerate() {
+            channel.process_output(i == focused);
         }
     }
 
     /// Resize all PTYs
     fn resize_all(&mut self, rows: u16, cols: u16) -> Result<()> {
-        for pty in &mut self.ptys {
-            pty.resize(rows, cols)?;
+        for channel in &mut self.channels {
+            channel.pty.resize(rows, cols)?;
         }
         Ok(())
     }
 
-    /// Switch to next PTY
-    fn next_pty(&mut self) {
-        self.focused = (self.focused + 1) % self.ptys.len();
-        self.ptys[self.focused].clear_activity();
+    /// Switch to next channel
+    fn next_channel(&mut self) {
+        self.focused = (self.focused + 1) % self.channels.len();
+        self.channels[self.focused].clear_activity();
     }
 
-    /// Switch to previous PTY
-    fn prev_pty(&mut self) {
+    /// Switch to previous channel
+    fn prev_channel(&mut self) {
         if self.focused == 0 {
-            self.focused = self.ptys.len() - 1;
+            self.focused = self.channels.len() - 1;
         } else {
             self.focused -= 1;
         }
-        self.ptys[self.focused].clear_activity();
-    }
-
-    /// Get the number of PTYs
-    fn pty_count(&self) -> usize {
-        self.ptys.len()
+        self.channels[self.focused].clear_activity();
     }
 }
 
@@ -94,6 +105,9 @@ async fn main() -> Result<()> {
         original_hook(panic);
     }));
 
+    // Load configuration
+    let config = Config::load()?;
+
     // Set up terminal
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -105,8 +119,8 @@ async fn main() -> Result<()> {
     let size = terminal.size()?;
     let pty_height = size.height.saturating_sub(1);
 
-    // Create app with 3 PTYs
-    let mut app = App::new(3, pty_height, size.width)?;
+    // Create app from config
+    let mut app = App::from_config(&config, pty_height, size.width)?;
 
     // Run the app
     let result = run(&mut terminal, &mut app).await;
@@ -159,7 +173,7 @@ async fn run(
     let mut render_interval = tokio::time::interval(Duration::from_millis(16)); // ~60fps
 
     loop {
-        // Process output from all PTYs (not just focused)
+        // Process output from all channels
         app.process_all_output();
 
         tokio::select! {
@@ -171,19 +185,19 @@ async fn run(
                         if key.modifiers.contains(KeyModifiers::CONTROL) {
                             match key.code {
                                 KeyCode::Char('q') => break, // Quit
-                                KeyCode::Char('n') => app.next_pty(), // Next PTY
-                                KeyCode::Char('p') => app.prev_pty(), // Previous PTY
+                                KeyCode::Char('n') => app.next_channel(), // Next channel
+                                KeyCode::Char('p') => app.prev_channel(), // Previous channel
                                 _ => {
                                     // Forward other Ctrl+ keys to PTY
                                     if let Some(bytes) = key_to_bytes(key) {
-                                        app.focused_pty().write(&bytes)?;
+                                        app.focused_channel().pty.write(&bytes)?;
                                     }
                                 }
                             }
                         } else {
                             // Forward regular keys to focused PTY
                             if let Some(bytes) = key_to_bytes(key) {
-                                app.focused_pty().write(&bytes)?;
+                                app.focused_channel().pty.write(&bytes)?;
                             }
                         }
                     }
@@ -200,20 +214,19 @@ async fn run(
             _ = render_interval.tick() => {
                 let focused = app.focused;
 
-                // Build status showing activity per PTY
-                let pty_status: String = app.ptys.iter().enumerate().map(|(i, pty)| {
-                    let marker = match &pty.activity {
+                // Build status showing channel names with activity
+                let channel_status: String = app.channels.iter().enumerate().map(|(i, ch)| {
+                    let marker = match ch.activity() {
                         ActivityState::Idle => "",
                         ActivityState::Active(0) => "*",
                         ActivityState::Active(n) => {
-                            // Can't easily format in a closure, use static markers
                             if *n > 0 { "!" } else { "*" }
                         }
                     };
                     if i == focused {
-                        format!("[{}{}]", i + 1, marker)
+                        format!("[{}{}]", ch.name, marker)
                     } else {
-                        format!(" {}{} ", i + 1, marker)
+                        format!(" {}{} ", ch.name, marker)
                     }
                 }).collect::<Vec<_>>().join("");
 
@@ -227,13 +240,13 @@ async fn run(
                         .split(frame.area());
 
                     // PTY in main area
-                    let pseudo_term = PseudoTerminal::new(app.focused_pty().screen());
+                    let pseudo_term = PseudoTerminal::new(app.focused_channel().pty.screen());
                     frame.render_widget(pseudo_term, chunks[0]);
 
-                    // Status line with activity indicators
+                    // Status line with channel names and activity
                     let status = format!(
                         " {} | Ctrl+N/P: switch | Ctrl+Q: quit ",
-                        pty_status
+                        channel_status
                     );
                     let status_widget = Paragraph::new(status)
                         .style(Style::default().bg(Color::DarkGray).fg(Color::White));

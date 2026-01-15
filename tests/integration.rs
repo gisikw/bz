@@ -209,7 +209,7 @@ fn test_input_forwarding() -> Result<()> {
     Ok(())
 }
 
-/// Test tab switching: Ctrl+N cycles through PTYs
+/// Test tab switching: Ctrl+N cycles through channels
 #[test]
 fn test_tab_switching() -> Result<()> {
     use portable_pty::{native_pty_system, PtySize};
@@ -225,6 +225,8 @@ fn test_tab_switching() -> Result<()> {
 
     let mut cmd = portable_pty::CommandBuilder::new(bz_binary());
     cmd.env("TERM", "xterm-256color");
+    // Set CWD to project root where bz.toml exists
+    cmd.cwd(env!("CARGO_MANIFEST_DIR"));
     let mut child = pair.slave.spawn_command(cmd)?;
 
     let mut reader = pair.master.try_clone_reader()?;
@@ -250,15 +252,14 @@ fn test_tab_switching() -> Result<()> {
     let screen = parser.screen().contents();
     println!("Initial screen: {:?}", screen);
 
-    // Should show "[1]" (focused on PTY 1) in status line
-    // Format is now: [1] 2* 3* (with activity indicators)
+    // Should show "[main]" (focused on first channel from bz.toml)
     assert!(
-        screen.contains("[1]"),
-        "Should start focused on PTY 1 ([1]), got: {}",
+        screen.contains("[main]"),
+        "Should start focused on channel 'main' ([main]), got: {}",
         screen
     );
 
-    // Send Ctrl+N (0x0E) to switch to next PTY
+    // Send Ctrl+N (0x0E) to switch to next channel
     writer.write_all(&[0x0E])?;
     writer.flush()?;
 
@@ -268,10 +269,10 @@ fn test_tab_switching() -> Result<()> {
     let screen = parser.screen().contents();
     println!("After Ctrl+N: {:?}", screen);
 
-    // Should now show "[2]" (focused on PTY 2)
+    // Should now show "[build]" (second channel)
     assert!(
-        screen.contains("[2]"),
-        "Should be focused on PTY 2 ([2]) after Ctrl+N, got: {}",
+        screen.contains("[build]"),
+        "Should be focused on channel 'build' after Ctrl+N, got: {}",
         screen
     );
 
@@ -282,24 +283,24 @@ fn test_tab_switching() -> Result<()> {
 
     let screen = parser.screen().contents();
 
-    // Should now show "[3]" (focused on PTY 3)
+    // Should now show "[logs]" (third channel)
     assert!(
-        screen.contains("[3]"),
-        "Should be focused on PTY 3 ([3]) after second Ctrl+N, got: {}",
+        screen.contains("[logs]"),
+        "Should be focused on channel 'logs' after second Ctrl+N, got: {}",
         screen
     );
 
-    // Send Ctrl+N again (should wrap to PTY 1)
+    // Send Ctrl+N again (should wrap to first channel)
     writer.write_all(&[0x0E])?;
     writer.flush()?;
     read_output(&mut reader, &mut parser, 200);
 
     let screen = parser.screen().contents();
 
-    // Should wrap back to "[1]" (focused on PTY 1)
+    // Should wrap back to "[main]"
     assert!(
-        screen.contains("[1]"),
-        "Should wrap to PTY 1 ([1]), got: {}",
+        screen.contains("[main]"),
+        "Should wrap to channel 'main', got: {}",
         screen
     );
 
@@ -322,7 +323,7 @@ fn test_tab_switching() -> Result<()> {
     Ok(())
 }
 
-/// Test activity detection: unfocused PTYs show activity markers
+/// Test activity detection: unfocused channels show activity markers
 #[test]
 fn test_activity_detection() -> Result<()> {
     use portable_pty::{native_pty_system, PtySize};
@@ -338,6 +339,8 @@ fn test_activity_detection() -> Result<()> {
 
     let mut cmd = portable_pty::CommandBuilder::new(bz_binary());
     cmd.env("TERM", "xterm-256color");
+    // Set CWD to project root where bz.toml exists
+    cmd.cwd(env!("CARGO_MANIFEST_DIR"));
     let mut child = pair.slave.spawn_command(cmd)?;
 
     let mut reader = pair.master.try_clone_reader()?;
@@ -356,45 +359,45 @@ fn test_activity_detection() -> Result<()> {
         }
     }
 
-    // Wait for initial render - PTYs 2 and 3 may already have activity from shell startup
+    // Wait for initial render - channels 2 and 3 may already have activity from shell startup
     read_output(&mut reader, &mut parser, 1000);
 
     let screen = parser.screen().contents();
     println!("Initial screen: {:?}", screen);
 
-    // Should be focused on [1]
-    assert!(screen.contains("[1]"), "Should start on PTY 1");
+    // Should be focused on [main]
+    assert!(screen.contains("[main]"), "Should start on channel 'main'");
 
-    // Note: PTYs 2 and 3 likely already have activity (*) from shell startup
+    // Note: Other channels likely already have activity (*) from shell startup
     // This actually proves activity detection is working!
 
-    // Switch to PTY 2 (clears its activity)
+    // Switch to channel 2 'build' (clears its activity)
     writer.write_all(&[0x0E])?; // Ctrl+N
     writer.flush()?;
     read_output(&mut reader, &mut parser, 200);
 
     let screen = parser.screen().contents();
-    println!("On PTY 2: {:?}", screen);
+    println!("On channel 'build': {:?}", screen);
 
-    // Now run a command in PTY 2 that outputs something
-    // Then switch to PTY 3 to check PTY 2 gets activity
+    // Now run a command in 'build' channel that outputs something
+    // Then switch to 'logs' to check 'build' gets activity
     writer.write_all(b"echo activity_test\r")?;
     writer.flush()?;
     read_output(&mut reader, &mut parser, 500);
 
-    // Switch to PTY 3
+    // Switch to 'logs' channel
     writer.write_all(&[0x0E])?; // Ctrl+N
     writer.flush()?;
     read_output(&mut reader, &mut parser, 200);
 
     let screen = parser.screen().contents();
-    println!("On PTY 3: {:?}", screen);
+    println!("On channel 'logs': {:?}", screen);
 
-    // Should be focused on [3], PTY 2 should NOT have activity marker
+    // Should be focused on [logs], 'build' should NOT have activity marker
     // because we just left it (activity clears when you leave)
-    assert!(screen.contains("[3]"), "Should be on PTY 3");
+    assert!(screen.contains("[logs]"), "Should be on channel 'logs'");
 
-    // Now if PTY 2 has any new output, it should get an activity marker
+    // Now if 'build' has any new output, it should get an activity marker
     // We can't easily trigger that in this test, but the core mechanism works
 
     // Quit
