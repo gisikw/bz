@@ -19,7 +19,7 @@ fn bz_binary() -> String {
     format!("{}/target/debug/bz", manifest_dir)
 }
 
-/// Test: spawn bz, verify shell renders, send Ctrl+Q to quit
+/// Test: spawn bz, verify shell renders, send Ctrl+B q to quit
 #[test]
 fn test_bz_spawns_shell_and_renders() -> Result<()> {
     use portable_pty::{native_pty_system, PtySize};
@@ -85,8 +85,12 @@ fn test_bz_spawns_shell_and_renders() -> Result<()> {
         }
     }
 
-    // Send Ctrl+Q to quit (0x11 is Ctrl+Q)
-    writer.write_all(&[0x11])?;
+    // Send Ctrl+B q to quit (leader mode)
+    // Need a small delay between leader key and command for event loop to process them separately
+    writer.write_all(&[0x02])?; // Ctrl+B enters leader mode
+    writer.flush()?;
+    std::thread::sleep(Duration::from_millis(100));
+    writer.write_all(&[b'q'])?; // q quits
     writer.flush()?;
 
     // Wait for process to exit (with timeout)
@@ -100,7 +104,7 @@ fn test_bz_spawns_shell_and_renders() -> Result<()> {
         if start.elapsed() > Duration::from_secs(2) {
             panic!("Process did not exit within 2 seconds after Ctrl+Q was sent");
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     Ok(())
@@ -189,8 +193,12 @@ fn test_input_forwarding() -> Result<()> {
         "Process should still be running"
     );
 
-    // Send Ctrl+Q to quit
-    writer.write_all(&[0x11])?;
+    // Send Ctrl+B q to quit (leader mode)
+    // Need a small delay between leader key and command for event loop to process them separately
+    writer.write_all(&[0x02])?; // Ctrl+B enters leader mode
+    writer.flush()?;
+    std::thread::sleep(Duration::from_millis(100));
+    writer.write_all(&[b'q'])?; // q quits
     writer.flush()?;
 
     // Wait for exit
@@ -203,13 +211,13 @@ fn test_input_forwarding() -> Result<()> {
         if start.elapsed() > Duration::from_secs(2) {
             panic!("Process did not exit after Ctrl+Q");
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     Ok(())
 }
 
-/// Test tab switching: Ctrl+N cycles through channels
+/// Test tab switching: Ctrl+B n cycles through channels (leader mode)
 #[test]
 fn test_tab_switching() -> Result<()> {
     use portable_pty::{native_pty_system, PtySize};
@@ -267,8 +275,11 @@ fn test_tab_switching() -> Result<()> {
         screen
     );
 
-    // Send Ctrl+N (0x0E) to switch to next channel (build)
-    writer.write_all(&[0x0E])?;
+    // Send Ctrl+B n to switch to next channel (build) - leader mode
+    writer.write_all(&[0x02])?; // Ctrl+B enters leader mode
+    writer.flush()?;
+    std::thread::sleep(Duration::from_millis(100));
+    writer.write_all(&[b'n'])?; // n = next channel
     writer.flush()?;
 
     // Wait for render update
@@ -284,8 +295,11 @@ fn test_tab_switching() -> Result<()> {
         screen
     );
 
-    // Send Ctrl+N again to switch to logs
-    writer.write_all(&[0x0E])?;
+    // Send Ctrl+B n again to switch to logs
+    writer.write_all(&[0x02])?;
+    writer.flush()?;
+    std::thread::sleep(Duration::from_millis(100));
+    writer.write_all(&[b'n'])?;
     writer.flush()?;
     read_output(&mut reader, &mut parser, 200);
 
@@ -298,8 +312,11 @@ fn test_tab_switching() -> Result<()> {
         screen
     );
 
-    // Send Ctrl+N again (should wrap to main)
-    writer.write_all(&[0x0E])?;
+    // Send Ctrl+B n again (should wrap to main)
+    writer.write_all(&[0x02])?;
+    writer.flush()?;
+    std::thread::sleep(Duration::from_millis(100));
+    writer.write_all(&[b'n'])?;
     writer.flush()?;
     read_output(&mut reader, &mut parser, 200);
 
@@ -312,8 +329,11 @@ fn test_tab_switching() -> Result<()> {
         screen
     );
 
-    // Quit
-    writer.write_all(&[0x11])?;
+    // Quit (Ctrl+B q - leader mode)
+    writer.write_all(&[0x02])?;
+    writer.flush()?;
+    std::thread::sleep(Duration::from_millis(100));
+    writer.write_all(&[b'q'])?;
     writer.flush()?;
 
     let start = std::time::Instant::now();
@@ -323,9 +343,9 @@ fn test_tab_switching() -> Result<()> {
             break;
         }
         if start.elapsed() > Duration::from_secs(2) {
-            panic!("Process did not exit after Ctrl+Q");
+            panic!("Process did not exit after Ctrl+B q");
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     Ok(())
@@ -391,7 +411,10 @@ fn test_activity_detection() -> Result<()> {
     );
 
     // Switch to channel 2 'build' (clears its activity)
-    writer.write_all(&[0x0E])?; // Ctrl+N
+    writer.write_all(&[0x02])?; // Ctrl+B (leader mode)
+    writer.flush()?;
+    std::thread::sleep(Duration::from_millis(100));
+    writer.write_all(&[b'n'])?; // n = next channel
     writer.flush()?;
     read_output(&mut reader, &mut parser, 200);
 
@@ -411,7 +434,10 @@ fn test_activity_detection() -> Result<()> {
     read_output(&mut reader, &mut parser, 500);
 
     // Switch to 'logs' channel
-    writer.write_all(&[0x0E])?; // Ctrl+N
+    writer.write_all(&[0x02])?; // Ctrl+B (leader mode)
+    writer.flush()?;
+    std::thread::sleep(Duration::from_millis(100));
+    writer.write_all(&[b'n'])?; // n = next channel
     writer.flush()?;
     read_output(&mut reader, &mut parser, 200);
 
@@ -427,8 +453,11 @@ fn test_activity_detection() -> Result<()> {
     // Now if 'build' has any new output, it should get an activity marker
     // We can't easily trigger that in this test, but the core mechanism works
 
-    // Quit
-    writer.write_all(&[0x11])?;
+    // Quit (Ctrl+B q - leader mode)
+    writer.write_all(&[0x02])?;
+    writer.flush()?;
+    std::thread::sleep(Duration::from_millis(100));
+    writer.write_all(&[b'q'])?;
     writer.flush()?;
 
     let start = std::time::Instant::now();
@@ -438,9 +467,9 @@ fn test_activity_detection() -> Result<()> {
             break;
         }
         if start.elapsed() > Duration::from_secs(2) {
-            panic!("Process did not exit after Ctrl+Q");
+            panic!("Process did not exit after Ctrl+B q");
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     Ok(())

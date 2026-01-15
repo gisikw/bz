@@ -16,14 +16,25 @@ use futures::StreamExt;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     widgets::Paragraph,
     Terminal,
 };
 use tui_term::widget::PseudoTerminal;
 
+use crate::channel::Channel;
 use crate::config::Config;
 use crate::sidebar::{Sidebar, SIDEBAR_WIDTH};
+
+/// Input mode for key handling
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum InputMode {
+    /// Normal mode - keys go to PTY
+    #[default]
+    Normal,
+    /// Leader mode - waiting for command after Ctrl+B
+    Leader,
+}
 
 /// Application state
 struct App {
@@ -31,6 +42,8 @@ struct App {
     channels: Vec<Channel>,
     /// Index of the currently focused channel
     focused: usize,
+    /// Current input mode
+    input_mode: InputMode,
 }
 
 impl App {
@@ -56,6 +69,7 @@ impl App {
         Ok(Self {
             channels,
             focused: 0,
+            input_mode: InputMode::default(),
         })
     }
 
@@ -97,6 +111,14 @@ impl App {
             self.focused -= 1;
         }
         self.channels[self.focused].clear_activity();
+    }
+
+    /// Switch to specific channel by index
+    fn switch_to_channel(&mut self, idx: usize) {
+        if idx < self.channels.len() {
+            self.focused = idx;
+            self.channels[self.focused].clear_activity();
+        }
     }
 }
 
@@ -188,23 +210,59 @@ async fn run(
             Some(event_result) = event_stream.next() => {
                 match event_result? {
                     Event::Key(key) => {
-                        // Handle Ctrl+ keybinds
-                        if key.modifiers.contains(KeyModifiers::CONTROL) {
-                            match key.code {
-                                KeyCode::Char('q') => break, // Quit
-                                KeyCode::Char('n') => app.next_channel(), // Next channel
-                                KeyCode::Char('p') => app.prev_channel(), // Previous channel
-                                _ => {
-                                    // Forward other Ctrl+ keys to PTY
+                        match app.input_mode {
+                            InputMode::Normal => {
+                                // Ctrl+B enters leader mode
+                                if key.code == KeyCode::Char('b')
+                                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                                {
+                                    app.input_mode = InputMode::Leader;
+                                } else {
+                                    // All other keys go to PTY
                                     if let Some(bytes) = key_to_bytes(key) {
                                         app.focused_channel().pty.write(&bytes)?;
                                     }
                                 }
                             }
-                        } else {
-                            // Forward regular keys to focused PTY
-                            if let Some(bytes) = key_to_bytes(key) {
-                                app.focused_channel().pty.write(&bytes)?;
+                            InputMode::Leader => {
+                                // Always return to normal after processing
+                                app.input_mode = InputMode::Normal;
+
+                                match key.code {
+                                    // Navigation
+                                    KeyCode::Char('j') | KeyCode::Down => {
+                                        app.next_channel();
+                                    }
+                                    KeyCode::Char('k') | KeyCode::Up => {
+                                        app.prev_channel();
+                                    }
+                                    KeyCode::Char('n') => {
+                                        app.next_channel();
+                                    }
+                                    KeyCode::Char('p') => {
+                                        app.prev_channel();
+                                    }
+
+                                    // Direct channel access (1-9)
+                                    KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+                                        let idx = (c as usize) - ('1' as usize);
+                                        app.switch_to_channel(idx);
+                                    }
+
+                                    // Quit
+                                    KeyCode::Char('q') => {
+                                        break;
+                                    }
+
+                                    // Send Ctrl+B to PTY (double-tap)
+                                    KeyCode::Char('b') => {
+                                        let bytes = vec![2]; // Ctrl+B = ASCII 2
+                                        app.focused_channel().pty.write(&bytes)?;
+                                    }
+
+                                    // Cancel / unknown - just ignore
+                                    KeyCode::Esc | _ => {}
+                                }
                             }
                         }
                     }
@@ -246,10 +304,23 @@ async fn run(
                     let pseudo_term = PseudoTerminal::new(app.focused_channel().pty.screen());
                     frame.render_widget(pseudo_term, v_chunks[0]);
 
-                    // Status line
-                    let status = " Ctrl+N/P: switch | Ctrl+Q: quit ";
-                    let status_widget = Paragraph::new(status)
-                        .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+                    // Status line with mode indicator
+                    let status = match app.input_mode {
+                        InputMode::Normal => {
+                            " Ctrl+B: leader | j/k: nav | q: quit ".to_string()
+                        }
+                        InputMode::Leader => {
+                            " -- LEADER -- j/k: nav | 1-9: jump | q: quit | b: send Ctrl+B ".to_string()
+                        }
+                    };
+                    let status_style = match app.input_mode {
+                        InputMode::Normal => Style::default().bg(Color::DarkGray).fg(Color::White),
+                        InputMode::Leader => Style::default()
+                            .bg(Color::Yellow)
+                            .fg(Color::Black)
+                            .add_modifier(Modifier::BOLD),
+                    };
+                    let status_widget = Paragraph::new(status).style(status_style);
                     frame.render_widget(status_widget, v_chunks[1]);
                 })?;
             }
