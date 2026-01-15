@@ -233,8 +233,8 @@ fn test_tab_switching() -> Result<()> {
 
     let mut cmd = portable_pty::CommandBuilder::new(bz_binary());
     cmd.env("TERM", "xterm-256color");
-    // Set CWD to project root where bz.toml exists
-    cmd.cwd(env!("CARGO_MANIFEST_DIR"));
+    // Set CWD to test fixtures where test bz.toml exists
+    cmd.cwd(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"));
     let mut child = pair.slave.spawn_command(cmd)?;
 
     let mut reader = pair.master.try_clone_reader()?;
@@ -367,8 +367,8 @@ fn test_activity_detection() -> Result<()> {
 
     let mut cmd = portable_pty::CommandBuilder::new(bz_binary());
     cmd.env("TERM", "xterm-256color");
-    // Set CWD to project root where bz.toml exists
-    cmd.cwd(env!("CARGO_MANIFEST_DIR"));
+    // Set CWD to test fixtures where test bz.toml exists
+    cmd.cwd(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"));
     let mut child = pair.slave.spawn_command(cmd)?;
 
     let mut reader = pair.master.try_clone_reader()?;

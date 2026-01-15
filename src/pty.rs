@@ -84,7 +84,14 @@ impl Pty {
             })
             .map_err(|e| color_eyre::eyre::eyre!("Failed to open PTY: {}", e))?;
 
-        let mut cmd = CommandBuilder::new(command);
+        // Parse command string into binary and arguments
+        let parts: Vec<&str> = command.split_whitespace().collect();
+        let (bin, args) = parts.split_first().ok_or_else(|| {
+            color_eyre::eyre::eyre!("Empty command string")
+        })?;
+
+        let mut cmd = CommandBuilder::new(bin);
+        cmd.args(args);
         if let Some(dir) = cwd {
             cmd.cwd(dir);
         }
