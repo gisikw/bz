@@ -85,8 +85,8 @@ fn main() -> Result<()> {
     // Create vt100 parser
     let mut parser = vt100::Parser::new(size.height, size.width, 0);
 
-    // Run the app
-    let result = run(&mut terminal, &mut parser, &rx, &mut pty_writer);
+    // Run the app (pass master for resize handling)
+    let result = run(&mut terminal, &mut parser, &rx, &mut pty_writer, &pair.master);
 
     // Restore terminal (always, even on error)
     disable_raw_mode()?;
@@ -133,6 +133,7 @@ fn run(
     parser: &mut vt100::Parser,
     pty_rx: &mpsc::Receiver<Vec<u8>>,
     pty_writer: &mut Box<dyn Write + Send>,
+    pty_master: &Box<dyn portable_pty::MasterPty + Send>,
 ) -> Result<()> {
     loop {
         // Process any pending PTY output
@@ -148,17 +149,36 @@ fn run(
 
         // Handle input with short timeout for responsiveness
         if event::poll(Duration::from_millis(10))? {
-            if let Event::Key(key) = event::read()? {
-                // Ctrl+Q to quit bz
-                if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                    break;
-                }
+            match event::read()? {
+                Event::Key(key) => {
+                    // Ctrl+Q to quit bz
+                    if key.code == KeyCode::Char('q')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        break;
+                    }
 
-                // Forward all other keys to PTY
-                if let Some(bytes) = key_to_bytes(key) {
-                    pty_writer.write_all(&bytes)?;
-                    pty_writer.flush()?;
+                    // Forward all other keys to PTY
+                    if let Some(bytes) = key_to_bytes(key) {
+                        pty_writer.write_all(&bytes)?;
+                        pty_writer.flush()?;
+                    }
                 }
+                Event::Resize(cols, rows) => {
+                    // Resize PTY (sends SIGWINCH to child process)
+                    pty_master
+                        .resize(PtySize {
+                            rows,
+                            cols,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        })
+                        .map_err(|e| color_eyre::eyre::eyre!("Failed to resize PTY: {}", e))?;
+
+                    // Resize vt100 parser
+                    parser.set_size(rows, cols);
+                }
+                _ => {}
             }
         }
     }
