@@ -1,0 +1,32 @@
+[package]
+name = "bz"
+version = "0.1.0"
+edition = "2021"
+description = "A multi-agent coordination TUI"
+license = "MIT"
+
+[dependencies]
+# TUI framework
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# PTY and terminal emulation
+tui-term = "0.3"
+portable-pty = "0.9"
+vt100 = "0.15"
+
+# Error handling
+color-eyre = "0.6"
+
+# Config (Phase 4, but include now to avoid churn)
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "5"
+
+[profile.release]
+strip = true
+lto = true
