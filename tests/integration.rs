@@ -252,14 +252,22 @@ fn test_tab_switching() -> Result<()> {
     let screen = parser.screen().contents();
     println!("Initial screen: {:?}", screen);
 
-    // Should show "[main]" (focused on first channel from bz.toml)
+    // Sidebar shows "#main" (focused - no asterisk), "#build *", "#logs *"
+    // (build and logs have activity asterisks from shell startup)
     assert!(
-        screen.contains("[main]"),
-        "Should start focused on channel 'main' ([main]), got: {}",
+        screen.contains("#main"),
+        "Should show channel 'main' in sidebar, got: {}",
+        screen
+    );
+    // Main is focused, so it shouldn't have an asterisk right after its name
+    // (unfocused channels with activity show asterisk)
+    assert!(
+        !screen.contains("#main *"),
+        "Focused channel 'main' should not have activity asterisk, got: {}",
         screen
     );
 
-    // Send Ctrl+N (0x0E) to switch to next channel
+    // Send Ctrl+N (0x0E) to switch to next channel (build)
     writer.write_all(&[0x0E])?;
     writer.flush()?;
 
@@ -269,38 +277,38 @@ fn test_tab_switching() -> Result<()> {
     let screen = parser.screen().contents();
     println!("After Ctrl+N: {:?}", screen);
 
-    // Should now show "[build]" (second channel)
+    // Build is now focused, so it shouldn't have an asterisk
     assert!(
-        screen.contains("[build]"),
-        "Should be focused on channel 'build' after Ctrl+N, got: {}",
+        !screen.contains("#build *"),
+        "Focused channel 'build' should not have activity asterisk, got: {}",
         screen
     );
 
-    // Send Ctrl+N again
+    // Send Ctrl+N again to switch to logs
     writer.write_all(&[0x0E])?;
     writer.flush()?;
     read_output(&mut reader, &mut parser, 200);
 
     let screen = parser.screen().contents();
 
-    // Should now show "[logs]" (third channel)
+    // Logs is now focused
     assert!(
-        screen.contains("[logs]"),
-        "Should be focused on channel 'logs' after second Ctrl+N, got: {}",
+        !screen.contains("#logs *"),
+        "Focused channel 'logs' should not have activity asterisk, got: {}",
         screen
     );
 
-    // Send Ctrl+N again (should wrap to first channel)
+    // Send Ctrl+N again (should wrap to main)
     writer.write_all(&[0x0E])?;
     writer.flush()?;
     read_output(&mut reader, &mut parser, 200);
 
     let screen = parser.screen().contents();
 
-    // Should wrap back to "[main]"
+    // Main is focused again
     assert!(
-        screen.contains("[main]"),
-        "Should wrap to channel 'main', got: {}",
+        !screen.contains("#main *"),
+        "Wrapped back to 'main', should not have activity asterisk, got: {}",
         screen
     );
 
@@ -365,11 +373,22 @@ fn test_activity_detection() -> Result<()> {
     let screen = parser.screen().contents();
     println!("Initial screen: {:?}", screen);
 
-    // Should be focused on [main]
-    assert!(screen.contains("[main]"), "Should start on channel 'main'");
+    // Sidebar shows #main (focused - no asterisk), #build *, #logs *
+    assert!(screen.contains("#main"), "Should show channel 'main' in sidebar");
+    assert!(
+        !screen.contains("#main *"),
+        "Focused channel 'main' should not have activity asterisk"
+    );
 
     // Note: Other channels likely already have activity (*) from shell startup
     // This actually proves activity detection is working!
+    // Check that at least one of the unfocused channels shows activity
+    let has_activity = screen.contains("#build *") || screen.contains("#logs *");
+    assert!(
+        has_activity,
+        "At least one unfocused channel should have activity from shell startup, got: {}",
+        screen
+    );
 
     // Switch to channel 2 'build' (clears its activity)
     writer.write_all(&[0x0E])?; // Ctrl+N
@@ -378,6 +397,12 @@ fn test_activity_detection() -> Result<()> {
 
     let screen = parser.screen().contents();
     println!("On channel 'build': {:?}", screen);
+
+    // Build is now focused, so its asterisk should be cleared
+    assert!(
+        !screen.contains("#build *"),
+        "Focused channel 'build' should not have activity asterisk"
+    );
 
     // Now run a command in 'build' channel that outputs something
     // Then switch to 'logs' to check 'build' gets activity
@@ -393,9 +418,11 @@ fn test_activity_detection() -> Result<()> {
     let screen = parser.screen().contents();
     println!("On channel 'logs': {:?}", screen);
 
-    // Should be focused on [logs], 'build' should NOT have activity marker
-    // because we just left it (activity clears when you leave)
-    assert!(screen.contains("[logs]"), "Should be on channel 'logs'");
+    // Logs is now focused (no asterisk)
+    assert!(
+        !screen.contains("#logs *"),
+        "Focused channel 'logs' should not have activity asterisk"
+    );
 
     // Now if 'build' has any new output, it should get an activity marker
     // We can't easily trigger that in this test, but the core mechanism works

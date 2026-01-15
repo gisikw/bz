@@ -1,6 +1,7 @@
 mod channel;
 mod config;
 mod pty;
+mod sidebar;
 
 use std::io::{self, stdout};
 use std::time::Duration;
@@ -21,9 +22,8 @@ use ratatui::{
 };
 use tui_term::widget::PseudoTerminal;
 
-use crate::channel::Channel;
 use crate::config::Config;
-use crate::pty::ActivityState;
+use crate::sidebar::{Sidebar, SIDEBAR_WIDTH};
 
 /// Application state
 struct App {
@@ -35,15 +35,19 @@ struct App {
 
 impl App {
     /// Create app from configuration
+    ///
+    /// `rows` and `cols` are the full terminal dimensions. PTY width is
+    /// reduced by SIDEBAR_WIDTH.
     fn from_config(config: &Config, rows: u16, cols: u16) -> Result<Self> {
         use crate::pty::Pty;
 
+        let pty_cols = cols.saturating_sub(SIDEBAR_WIDTH);
         let mut channels = Vec::with_capacity(config.channel.len());
         for (id, ch_config) in config.channel.iter().enumerate() {
             let pty = Pty::spawn(
                 id,
                 rows,
-                cols,
+                pty_cols,
                 &ch_config.command,
                 ch_config.cwd.as_deref(),
             )?;
@@ -69,9 +73,12 @@ impl App {
     }
 
     /// Resize all PTYs
+    ///
+    /// `cols` should be the full terminal width - sidebar width is subtracted internally.
     fn resize_all(&mut self, rows: u16, cols: u16) -> Result<()> {
+        let pty_cols = cols.saturating_sub(SIDEBAR_WIDTH);
         for channel in &mut self.channels {
-            channel.pty.resize(rows, cols)?;
+            channel.pty.resize(rows, pty_cols)?;
         }
         Ok(())
     }
@@ -212,45 +219,38 @@ async fn run(
 
             // Render at regular intervals
             _ = render_interval.tick() => {
-                let focused = app.focused;
-
-                // Build status showing channel names with activity
-                let channel_status: String = app.channels.iter().enumerate().map(|(i, ch)| {
-                    let marker = match ch.activity() {
-                        ActivityState::Idle => "",
-                        ActivityState::Active(0) => "*",
-                        ActivityState::Active(n) => {
-                            if *n > 0 { "!" } else { "*" }
-                        }
-                    };
-                    if i == focused {
-                        format!("[{}{}]", ch.name, marker)
-                    } else {
-                        format!(" {}{} ", ch.name, marker)
-                    }
-                }).collect::<Vec<_>>().join("");
-
                 terminal.draw(|frame| {
-                    let chunks = Layout::default()
+                    // Horizontal split: sidebar | main content
+                    let h_chunks = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([
+                            Constraint::Length(SIDEBAR_WIDTH),
+                            Constraint::Min(0),
+                        ])
+                        .split(frame.area());
+
+                    // Render sidebar
+                    let sidebar = Sidebar::new(&app.channels, app.focused);
+                    frame.render_widget(sidebar, h_chunks[0]);
+
+                    // Vertical split for main content: PTY | status line
+                    let v_chunks = Layout::default()
                         .direction(Direction::Vertical)
                         .constraints([
                             Constraint::Min(0),
                             Constraint::Length(1),
                         ])
-                        .split(frame.area());
+                        .split(h_chunks[1]);
 
                     // PTY in main area
                     let pseudo_term = PseudoTerminal::new(app.focused_channel().pty.screen());
-                    frame.render_widget(pseudo_term, chunks[0]);
+                    frame.render_widget(pseudo_term, v_chunks[0]);
 
-                    // Status line with channel names and activity
-                    let status = format!(
-                        " {} | Ctrl+N/P: switch | Ctrl+Q: quit ",
-                        channel_status
-                    );
+                    // Status line
+                    let status = " Ctrl+N/P: switch | Ctrl+Q: quit ";
                     let status_widget = Paragraph::new(status)
                         .style(Style::default().bg(Color::DarkGray).fg(Color::White));
-                    frame.render_widget(status_widget, chunks[1]);
+                    frame.render_widget(status_widget, v_chunks[1]);
                 })?;
             }
         }
