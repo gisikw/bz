@@ -19,7 +19,7 @@ use ratatui::{
 };
 use tui_term::widget::PseudoTerminal;
 
-use crate::pty::Pty;
+use crate::pty::{ActivityState, Pty};
 
 /// Application state
 struct App {
@@ -46,8 +46,9 @@ impl App {
 
     /// Process output from all PTYs
     fn process_all_output(&mut self) {
-        for pty in &mut self.ptys {
-            pty.process_output();
+        let focused = self.focused;
+        for (i, pty) in self.ptys.iter_mut().enumerate() {
+            pty.process_output(i == focused);
         }
     }
 
@@ -62,6 +63,7 @@ impl App {
     /// Switch to next PTY
     fn next_pty(&mut self) {
         self.focused = (self.focused + 1) % self.ptys.len();
+        self.ptys[self.focused].clear_activity();
     }
 
     /// Switch to previous PTY
@@ -71,6 +73,7 @@ impl App {
         } else {
             self.focused -= 1;
         }
+        self.ptys[self.focused].clear_activity();
     }
 
     /// Get the number of PTYs
@@ -196,7 +199,23 @@ async fn run(
             // Render at regular intervals
             _ = render_interval.tick() => {
                 let focused = app.focused;
-                let count = app.pty_count();
+
+                // Build status showing activity per PTY
+                let pty_status: String = app.ptys.iter().enumerate().map(|(i, pty)| {
+                    let marker = match &pty.activity {
+                        ActivityState::Idle => "",
+                        ActivityState::Active(0) => "*",
+                        ActivityState::Active(n) => {
+                            // Can't easily format in a closure, use static markers
+                            if *n > 0 { "!" } else { "*" }
+                        }
+                    };
+                    if i == focused {
+                        format!("[{}{}]", i + 1, marker)
+                    } else {
+                        format!(" {}{} ", i + 1, marker)
+                    }
+                }).collect::<Vec<_>>().join("");
 
                 terminal.draw(|frame| {
                     let chunks = Layout::default()
@@ -211,11 +230,10 @@ async fn run(
                     let pseudo_term = PseudoTerminal::new(app.focused_pty().screen());
                     frame.render_widget(pseudo_term, chunks[0]);
 
-                    // Status line
+                    // Status line with activity indicators
                     let status = format!(
-                        " PTY {}/{} | Ctrl+N/P: switch | Ctrl+Q: quit ",
-                        focused + 1,
-                        count
+                        " {} | Ctrl+N/P: switch | Ctrl+Q: quit ",
+                        pty_status
                     );
                     let status_widget = Paragraph::new(status)
                         .style(Style::default().bg(Color::DarkGray).fg(Color::White));

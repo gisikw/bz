@@ -9,12 +9,24 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use tokio::sync::mpsc;
 use vt100::Parser;
 
+/// Activity state for a PTY
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum ActivityState {
+    /// No unread output
+    #[default]
+    Idle,
+    /// Has unread output, with count of bells received
+    Active(u32),
+}
+
 /// A PTY instance with its terminal emulator state
 pub struct Pty {
     /// Unique identifier for this PTY
     pub id: usize,
     /// Terminal emulator state (parses escape sequences, maintains screen)
     pub parser: Parser,
+    /// Activity state (unread output, bells)
+    pub activity: ActivityState,
     /// Master PTY handle (for resize)
     master: Box<dyn MasterPty + Send>,
     /// Writer to send input to the PTY
@@ -75,6 +87,7 @@ impl Pty {
         Ok(Self {
             id,
             parser,
+            activity: ActivityState::default(),
             master: pair.master,
             writer,
             output_rx: rx,
@@ -103,14 +116,42 @@ impl Pty {
     }
 
     /// Process any pending output from the PTY
-    /// Returns true if any data was processed
-    pub fn process_output(&mut self) -> bool {
+    ///
+    /// If `is_focused` is false, updates activity state for unread output
+    /// and counts bells (0x07) in the data.
+    ///
+    /// Returns true if any data was processed.
+    pub fn process_output(&mut self, is_focused: bool) -> bool {
         let mut processed = false;
+
         while let Ok(data) = self.output_rx.try_recv() {
-            self.parser.process(&data);
             processed = true;
+
+            // Track activity if not focused
+            if !is_focused {
+                // Count bells (ASCII BEL = 0x07)
+                let bell_count = data.iter().filter(|&&b| b == 0x07).count() as u32;
+
+                match &mut self.activity {
+                    ActivityState::Idle => {
+                        self.activity = ActivityState::Active(bell_count);
+                    }
+                    ActivityState::Active(count) => {
+                        *count += bell_count;
+                    }
+                }
+            }
+
+            // Always process through parser
+            self.parser.process(&data);
         }
+
         processed
+    }
+
+    /// Clear activity state (call when PTY becomes focused)
+    pub fn clear_activity(&mut self) {
+        self.activity = ActivityState::Idle;
     }
 
     /// Get the terminal screen for rendering
