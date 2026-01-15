@@ -106,9 +106,9 @@ fn test_bz_spawns_shell_and_renders() -> Result<()> {
     Ok(())
 }
 
-/// Test that regular keys go to shell, only Ctrl+Q quits
+/// Test input forwarding: send a command, verify it appears in output
 #[test]
-fn test_keys_go_to_shell_ctrl_q_quits() -> Result<()> {
+fn test_input_forwarding() -> Result<()> {
     use portable_pty::{native_pty_system, PtySize};
     use std::io::{Read, Write};
     use std::sync::mpsc;
@@ -127,40 +127,73 @@ fn test_keys_go_to_shell_ctrl_q_quits() -> Result<()> {
 
     let mut reader = pair.master.try_clone_reader()?;
     let mut writer = pair.master.take_writer()?;
+    let mut parser = vt100::Parser::new(24, 80, 0);
 
-    // Wait for shell to start
+    // Wait for shell to start and show prompt
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Drain initial output
     let (tx, rx) = mpsc::channel();
-    let reader_thread = std::thread::spawn(move || {
+    std::thread::spawn(move || {
+        let mut all_data = Vec::new();
+        let mut buf = [0u8; 4096];
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_millis(300) {
+            if let Ok(n) = reader.read(&mut buf) {
+                if n > 0 {
+                    all_data.extend_from_slice(&buf[..n]);
+                }
+            }
+        }
+        tx.send((all_data, reader)).unwrap();
+    });
+
+    let (initial_data, mut reader) = rx.recv_timeout(Duration::from_secs(2))?;
+    parser.process(&initial_data);
+
+    // Send "echo test123" followed by Enter
+    writer.write_all(b"echo test123\r")?;
+    writer.flush()?;
+
+    // Read the output
+    let (tx2, rx2) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut all_data = Vec::new();
         let mut buf = [0u8; 4096];
         let start = std::time::Instant::now();
         while start.elapsed() < Duration::from_millis(500) {
-            let _ = reader.read(&mut buf);
+            if let Ok(n) = reader.read(&mut buf) {
+                if n > 0 {
+                    all_data.extend_from_slice(&buf[..n]);
+                }
+            }
         }
-        tx.send(reader).unwrap();
+        tx2.send(all_data).unwrap();
     });
 
-    // Send regular keys (including 'q' which should NOT quit since it goes to shell)
-    writer.write_all(b"echo hello")?;
-    writer.flush()?;
+    let output_data = rx2.recv_timeout(Duration::from_secs(2))?;
+    parser.process(&output_data);
 
-    // Get the reader back (wait for drain thread to finish)
-    let _reader = rx.recv_timeout(Duration::from_secs(2))?;
-    reader_thread.join().unwrap();
+    let screen = parser.screen().contents();
+    println!("Screen after command: {:?}", screen);
 
-    // Give time for keys to be processed
-    std::thread::sleep(Duration::from_millis(200));
-
-    // Process should still be running (keys went to shell, not as quit command)
+    // The screen should show "test123" (the output of echo)
     assert!(
-        child.try_wait()?.is_none(),
-        "Process should still be running - regular keys go to shell"
+        screen.contains("test123"),
+        "Screen should show command output 'test123'"
     );
 
-    // Now send Ctrl+Q to quit (0x11)
+    // Process should still be running
+    assert!(
+        child.try_wait()?.is_none(),
+        "Process should still be running"
+    );
+
+    // Send Ctrl+Q to quit
     writer.write_all(&[0x11])?;
     writer.flush()?;
 
-    // Should exit now
+    // Wait for exit
     let start = std::time::Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
