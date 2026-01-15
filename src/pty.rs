@@ -2,21 +2,44 @@
 //!
 //! Each PTY represents a shell session with its own terminal emulator state.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
+use std::time::{Duration, Instant};
 
 use color_eyre::eyre::Result;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use tokio::sync::mpsc;
 use vt100::Parser;
 
+/// How long to wait for screen to settle before confirming activity
+const ACTIVITY_SETTLE_TIME: Duration = Duration::from_millis(500);
+
 /// Activity state for a PTY
+///
+/// Uses content-based detection with settling to avoid false positives
+/// from transient screen changes (e.g., tmux redraw, echo+clear).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum ActivityState {
     /// No unread output
     #[default]
     Idle,
-    /// Has unread output, with count of bells received
+    /// Output received, waiting for screen to settle
+    /// Contains: (timestamp, screen hash before output, accumulated bells)
+    Pending {
+        since: Instant,
+        snapshot: u64,
+        bells: u32,
+    },
+    /// Confirmed activity (screen changed and settled), with bell count
     Active(u32),
+}
+
+/// Hash the screen contents for comparison
+fn hash_screen(screen: &vt100::Screen) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    screen.contents().hash(&mut hasher);
+    hasher.finish()
 }
 
 /// A PTY instance with its terminal emulator state
@@ -132,36 +155,86 @@ impl Pty {
 
     /// Process any pending output from the PTY
     ///
-    /// If `is_focused` is false, updates activity state for unread output
-    /// and counts bells (0x07) in the data.
+    /// If `is_focused` is false, updates activity state for unread output.
+    /// Uses content-based detection: captures screen snapshot before processing,
+    /// then waits for settle time before confirming activity.
+    ///
+    /// Bells (0x07) are accumulated but only shown if activity is confirmed.
     ///
     /// Returns true if any data was processed.
     pub fn process_output(&mut self, is_focused: bool) -> bool {
         let mut processed = false;
+        let mut total_bells = 0u32;
+
+        // Capture snapshot BEFORE processing if we're Idle and unfocused
+        // (we'll use this to detect if screen actually changed)
+        let pre_snapshot = if !is_focused && self.activity == ActivityState::Idle {
+            Some(hash_screen(self.parser.screen()))
+        } else {
+            None
+        };
 
         while let Ok(data) = self.output_rx.try_recv() {
             processed = true;
 
-            // Track activity if not focused
+            // Count bells before processing (ASCII BEL = 0x07)
             if !is_focused {
-                // Count bells (ASCII BEL = 0x07)
-                let bell_count = data.iter().filter(|&&b| b == 0x07).count() as u32;
-
-                match &mut self.activity {
-                    ActivityState::Idle => {
-                        self.activity = ActivityState::Active(bell_count);
-                    }
-                    ActivityState::Active(count) => {
-                        *count += bell_count;
-                    }
-                }
+                total_bells += data.iter().filter(|&&b| b == 0x07).count() as u32;
             }
 
             // Always process through parser
             self.parser.process(&data);
         }
 
+        // Update activity state if not focused and we processed data
+        if !is_focused && processed {
+            match &mut self.activity {
+                ActivityState::Idle => {
+                    // Transition to Pending with the pre-processing snapshot
+                    self.activity = ActivityState::Pending {
+                        since: Instant::now(),
+                        snapshot: pre_snapshot.unwrap_or_else(|| hash_screen(self.parser.screen())),
+                        bells: total_bells,
+                    };
+                }
+                ActivityState::Pending { bells, .. } => {
+                    // Still pending - accumulate bells
+                    // Don't reset timer - settle counts from first output
+                    *bells += total_bells;
+                }
+                ActivityState::Active(count) => {
+                    // Already confirmed active - just add bells
+                    *count += total_bells;
+                }
+            }
+        }
+
         processed
+    }
+
+    /// Check pending activity and promote to Active if settled and changed
+    ///
+    /// Call this periodically (e.g., in render loop) to check if pending
+    /// activity has settled and should be promoted to confirmed activity.
+    pub fn check_pending_activity(&mut self) {
+        if let ActivityState::Pending {
+            since,
+            snapshot,
+            bells,
+        } = self.activity
+        {
+            if since.elapsed() >= ACTIVITY_SETTLE_TIME {
+                // Settle time elapsed - check if screen actually changed
+                let current_hash = hash_screen(self.parser.screen());
+                if current_hash != snapshot {
+                    // Screen changed - confirm activity
+                    self.activity = ActivityState::Active(bells);
+                } else {
+                    // Screen returned to original - no real activity
+                    self.activity = ActivityState::Idle;
+                }
+            }
+        }
     }
 
     /// Clear activity state (call when PTY becomes focused)

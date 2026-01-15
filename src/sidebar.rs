@@ -41,9 +41,11 @@ impl Widget for Sidebar<'_> {
                 // Build channel line: " #channel_name"
                 let mut spans = vec![Span::raw(" #"), Span::raw(&ch.name)];
 
-                // Activity indicator
+                // Activity indicator (only for confirmed activity)
                 match activity {
-                    ActivityState::Idle => {}
+                    ActivityState::Idle | ActivityState::Pending { .. } => {
+                        // No indicator for idle or pending (not yet confirmed)
+                    }
                     ActivityState::Active(0) => {
                         spans.push(Span::styled(" *", Style::default().fg(Color::Yellow)));
                     }

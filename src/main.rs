@@ -86,6 +86,13 @@ impl App {
         }
     }
 
+    /// Check pending activities and promote to Active if settled
+    fn check_pending_activities(&mut self) {
+        for channel in &mut self.channels {
+            channel.pty.check_pending_activity();
+        }
+    }
+
     /// Resize all PTYs
     ///
     /// `cols` should be the full terminal width - sidebar width is subtracted internally.
@@ -277,6 +284,9 @@ async fn run(
 
             // Render at regular intervals
             _ = render_interval.tick() => {
+                // Check if any pending activities have settled
+                app.check_pending_activities();
+
                 terminal.draw(|frame| {
                     // Horizontal split: sidebar | main content
                     let h_chunks = Layout::default()
