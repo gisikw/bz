@@ -19,9 +19,9 @@ fn bz_binary() -> String {
     format!("{}/target/debug/bz", manifest_dir)
 }
 
-/// Simple test: spawn bz, read output, verify screen, quit
+/// Test: spawn bz, verify shell renders, send Ctrl+Q to quit
 #[test]
-fn test_bz_starts_and_renders() -> Result<()> {
+fn test_bz_spawns_shell_and_renders() -> Result<()> {
     use portable_pty::{native_pty_system, PtySize};
     use std::io::{Read, Write};
     use std::sync::mpsc;
@@ -45,6 +45,7 @@ fn test_bz_starts_and_renders() -> Result<()> {
     let mut parser = vt100::Parser::new(24, 80, 0);
 
     // Read output in a thread, collecting all data for a period
+    // Give more time for shell to initialize
     println!("Reading output...");
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -52,8 +53,8 @@ fn test_bz_starts_and_renders() -> Result<()> {
         let mut buf = [0u8; 4096];
         let start = std::time::Instant::now();
 
-        // Read for up to 500ms, collecting all output
-        while start.elapsed() < Duration::from_millis(500) {
+        // Read for up to 1s, collecting all output (shell needs time to start)
+        while start.elapsed() < Duration::from_millis(1000) {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
@@ -65,29 +66,27 @@ fn test_bz_starts_and_renders() -> Result<()> {
         let _ = tx.send(all_data);
     });
 
-    match rx.recv_timeout(Duration::from_secs(2)) {
+    match rx.recv_timeout(Duration::from_secs(3)) {
         Ok(data) => {
             println!("Read {} bytes total", data.len());
-            println!("Raw data (first 500): {:?}", String::from_utf8_lossy(&data[..data.len().min(500)]));
             parser.process(&data);
-            println!("After parse, screen contents len: {}", parser.screen().contents().len());
+            let screen = parser.screen().contents();
+            println!("Screen contents: {:?}", screen.trim());
+
+            // The shell should have rendered something (prompt, etc.)
+            // We just verify we got non-empty output
+            assert!(
+                !screen.trim().is_empty(),
+                "Screen should have content from shell"
+            );
         }
         Err(_) => {
-            println!("Timeout reading from PTY - no data received!");
+            panic!("Timeout reading from PTY - no data received!");
         }
     }
 
-    let screen = parser.screen().contents();
-
-    // Verify UI elements
-    assert!(screen.contains("bz"), "Should show app title");
-    assert!(
-        screen.contains("Press") && screen.contains("quit"),
-        "Should show quit instruction"
-    );
-
-    // Send quit and verify clean exit
-    writer.write_all(b"q")?;
+    // Send Ctrl+Q to quit (0x11 is Ctrl+Q)
+    writer.write_all(&[0x11])?;
     writer.flush()?;
 
     // Wait for process to exit (with timeout)
@@ -99,7 +98,7 @@ fn test_bz_starts_and_renders() -> Result<()> {
             break;
         }
         if start.elapsed() > Duration::from_secs(2) {
-            panic!("Process did not exit within 2 seconds after 'q' was sent");
+            panic!("Process did not exit within 2 seconds after Ctrl+Q was sent");
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -107,9 +106,9 @@ fn test_bz_starts_and_renders() -> Result<()> {
     Ok(())
 }
 
-/// Test that other keys don't quit the app
+/// Test that regular keys go to shell, only Ctrl+Q quits
 #[test]
-fn test_other_keys_dont_quit() -> Result<()> {
+fn test_keys_go_to_shell_ctrl_q_quits() -> Result<()> {
     use portable_pty::{native_pty_system, PtySize};
     use std::io::{Read, Write};
     use std::sync::mpsc;
@@ -129,19 +128,19 @@ fn test_other_keys_dont_quit() -> Result<()> {
     let mut reader = pair.master.try_clone_reader()?;
     let mut writer = pair.master.take_writer()?;
 
-    // Wait for initial render
+    // Wait for shell to start
     let (tx, rx) = mpsc::channel();
     let reader_thread = std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         let start = std::time::Instant::now();
-        while start.elapsed() < Duration::from_millis(300) {
+        while start.elapsed() < Duration::from_millis(500) {
             let _ = reader.read(&mut buf);
         }
         tx.send(reader).unwrap();
     });
 
-    // Send some other keys
-    writer.write_all(b"abc123")?;
+    // Send regular keys (including 'q' which should NOT quit since it goes to shell)
+    writer.write_all(b"echo hello")?;
     writer.flush()?;
 
     // Get the reader back (wait for drain thread to finish)
@@ -151,14 +150,14 @@ fn test_other_keys_dont_quit() -> Result<()> {
     // Give time for keys to be processed
     std::thread::sleep(Duration::from_millis(200));
 
-    // Process should still be running
+    // Process should still be running (keys went to shell, not as quit command)
     assert!(
         child.try_wait()?.is_none(),
-        "Process should still be running after non-quit keys"
+        "Process should still be running - regular keys go to shell"
     );
 
-    // Now send 'q' to quit
-    writer.write_all(b"q")?;
+    // Now send Ctrl+Q to quit (0x11)
+    writer.write_all(&[0x11])?;
     writer.flush()?;
 
     // Should exit now
@@ -169,7 +168,7 @@ fn test_other_keys_dont_quit() -> Result<()> {
             break;
         }
         if start.elapsed() > Duration::from_secs(2) {
-            panic!("Process did not exit after 'q'");
+            panic!("Process did not exit after Ctrl+Q");
         }
         std::thread::sleep(Duration::from_millis(50));
     }

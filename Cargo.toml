@@ -15,7 +15,7 @@ tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 
 # PTY and terminal emulation
-tui-term = "0.3"
+tui-term = "0.2"
 portable-pty = "0.9"
 vt100 = "0.15"
 
