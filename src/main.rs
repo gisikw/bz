@@ -1,4 +1,6 @@
-use std::io::{self, stdout, Read, Write};
+mod pty;
+
+use std::io::{self, stdout};
 use std::time::Duration;
 
 use color_eyre::eyre::Result;
@@ -8,10 +10,49 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::StreamExt;
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use ratatui::{backend::CrosstermBackend, Terminal};
-use tokio::sync::mpsc;
 use tui_term::widget::PseudoTerminal;
+
+use crate::pty::Pty;
+
+/// Application state
+struct App {
+    /// All PTY instances
+    ptys: Vec<Pty>,
+    /// Index of the currently focused PTY
+    focused: usize,
+}
+
+impl App {
+    /// Create a new app with the given number of PTYs
+    fn new(count: usize, rows: u16, cols: u16) -> Result<Self> {
+        let mut ptys = Vec::with_capacity(count);
+        for id in 0..count {
+            ptys.push(Pty::spawn(id, rows, cols)?);
+        }
+        Ok(Self { ptys, focused: 0 })
+    }
+
+    /// Get mutable reference to the focused PTY
+    fn focused_pty(&mut self) -> &mut Pty {
+        &mut self.ptys[self.focused]
+    }
+
+    /// Process output from all PTYs
+    fn process_all_output(&mut self) {
+        for pty in &mut self.ptys {
+            pty.process_output();
+        }
+    }
+
+    /// Resize all PTYs
+    fn resize_all(&mut self, rows: u16, cols: u16) -> Result<()> {
+        for pty in &mut self.ptys {
+            pty.resize(rows, cols)?;
+        }
+        Ok(())
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,62 +73,14 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Get terminal size for PTY
+    // Get terminal size
     let size = terminal.size()?;
 
-    // Spawn PTY with shell
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows: size.height,
-            cols: size.width,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| color_eyre::eyre::eyre!("Failed to open PTY: {}", e))?;
+    // Create app with 3 PTYs
+    let mut app = App::new(3, size.height, size.width)?;
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".into());
-    let cmd = CommandBuilder::new(shell);
-    let _child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| color_eyre::eyre::eyre!("Failed to spawn shell: {}", e))?;
-
-    // Get reader and writer for PTY
-    let mut pty_reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| color_eyre::eyre::eyre!("Failed to clone PTY reader: {}", e))?;
-
-    let mut pty_writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| color_eyre::eyre::eyre!("Failed to get PTY writer: {}", e))?;
-
-    // Async channel to receive PTY output
-    let (tx, rx) = mpsc::channel::<Vec<u8>>(256);
-
-    // Spawn blocking task to read from PTY
-    tokio::task::spawn_blocking(move || {
-        let mut buf = [0u8; 4096];
-        loop {
-            match pty_reader.read(&mut buf) {
-                Ok(0) => break, // EOF
-                Ok(n) => {
-                    if tx.blocking_send(buf[..n].to_vec()).is_err() {
-                        break; // Receiver dropped
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    // Create vt100 parser
-    let mut parser = vt100::Parser::new(size.height, size.width, 0);
-
-    // Run the app (pass master for resize handling)
-    let result = run(&mut terminal, &mut parser, rx, &mut pty_writer, &pair.master).await;
+    // Run the app
+    let result = run(&mut terminal, &mut app).await;
 
     // Restore terminal (always, even on error)
     disable_raw_mode()?;
@@ -131,15 +124,15 @@ fn key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
 
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    parser: &mut vt100::Parser,
-    mut pty_rx: mpsc::Receiver<Vec<u8>>,
-    pty_writer: &mut Box<dyn Write + Send>,
-    pty_master: &Box<dyn portable_pty::MasterPty + Send>,
+    app: &mut App,
 ) -> Result<()> {
     let mut event_stream = EventStream::new();
     let mut render_interval = tokio::time::interval(Duration::from_millis(16)); // ~60fps
 
     loop {
+        // Process output from all PTYs (not just focused)
+        app.process_all_output();
+
         tokio::select! {
             // Handle terminal events
             Some(event_result) = event_stream.next() => {
@@ -152,39 +145,22 @@ async fn run(
                             break;
                         }
 
-                        // Forward all other keys to PTY
+                        // Forward all other keys to focused PTY
                         if let Some(bytes) = key_to_bytes(key) {
-                            pty_writer.write_all(&bytes)?;
-                            pty_writer.flush()?;
+                            app.focused_pty().write(&bytes)?;
                         }
                     }
                     Event::Resize(cols, rows) => {
-                        // Resize PTY (sends SIGWINCH to child process)
-                        pty_master
-                            .resize(PtySize {
-                                rows,
-                                cols,
-                                pixel_width: 0,
-                                pixel_height: 0,
-                            })
-                            .map_err(|e| color_eyre::eyre::eyre!("Failed to resize PTY: {}", e))?;
-
-                        // Resize vt100 parser
-                        parser.set_size(rows, cols);
+                        app.resize_all(rows, cols)?;
                     }
                     _ => {}
                 }
             }
 
-            // Handle PTY output
-            Some(data) = pty_rx.recv() => {
-                parser.process(&data);
-            }
-
             // Render at regular intervals
             _ = render_interval.tick() => {
                 terminal.draw(|frame| {
-                    let pseudo_term = PseudoTerminal::new(parser.screen());
+                    let pseudo_term = PseudoTerminal::new(app.focused_pty().screen());
                     frame.render_widget(pseudo_term, frame.area());
                 })?;
             }
