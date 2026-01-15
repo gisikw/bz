@@ -10,7 +10,13 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::StreamExt;
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Style},
+    widgets::Paragraph,
+    Terminal,
+};
 use tui_term::widget::PseudoTerminal;
 
 use crate::pty::Pty;
@@ -52,6 +58,25 @@ impl App {
         }
         Ok(())
     }
+
+    /// Switch to next PTY
+    fn next_pty(&mut self) {
+        self.focused = (self.focused + 1) % self.ptys.len();
+    }
+
+    /// Switch to previous PTY
+    fn prev_pty(&mut self) {
+        if self.focused == 0 {
+            self.focused = self.ptys.len() - 1;
+        } else {
+            self.focused -= 1;
+        }
+    }
+
+    /// Get the number of PTYs
+    fn pty_count(&self) -> usize {
+        self.ptys.len()
+    }
 }
 
 #[tokio::main]
@@ -73,11 +98,12 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Get terminal size
+    // Get terminal size (minus 1 row for status line)
     let size = terminal.size()?;
+    let pty_height = size.height.saturating_sub(1);
 
     // Create app with 3 PTYs
-    let mut app = App::new(3, size.height, size.width)?;
+    let mut app = App::new(3, pty_height, size.width)?;
 
     // Run the app
     let result = run(&mut terminal, &mut app).await;
@@ -138,20 +164,30 @@ async fn run(
             Some(event_result) = event_stream.next() => {
                 match event_result? {
                     Event::Key(key) => {
-                        // Ctrl+Q to quit bz
-                        if key.code == KeyCode::Char('q')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            break;
-                        }
-
-                        // Forward all other keys to focused PTY
-                        if let Some(bytes) = key_to_bytes(key) {
-                            app.focused_pty().write(&bytes)?;
+                        // Handle Ctrl+ keybinds
+                        if key.modifiers.contains(KeyModifiers::CONTROL) {
+                            match key.code {
+                                KeyCode::Char('q') => break, // Quit
+                                KeyCode::Char('n') => app.next_pty(), // Next PTY
+                                KeyCode::Char('p') => app.prev_pty(), // Previous PTY
+                                _ => {
+                                    // Forward other Ctrl+ keys to PTY
+                                    if let Some(bytes) = key_to_bytes(key) {
+                                        app.focused_pty().write(&bytes)?;
+                                    }
+                                }
+                            }
+                        } else {
+                            // Forward regular keys to focused PTY
+                            if let Some(bytes) = key_to_bytes(key) {
+                                app.focused_pty().write(&bytes)?;
+                            }
                         }
                     }
                     Event::Resize(cols, rows) => {
-                        app.resize_all(rows, cols)?;
+                        // Resize PTYs (minus 1 for status line)
+                        let pty_height = rows.saturating_sub(1);
+                        app.resize_all(pty_height, cols)?;
                     }
                     _ => {}
                 }
@@ -159,9 +195,31 @@ async fn run(
 
             // Render at regular intervals
             _ = render_interval.tick() => {
+                let focused = app.focused;
+                let count = app.pty_count();
+
                 terminal.draw(|frame| {
+                    let chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Min(0),
+                            Constraint::Length(1),
+                        ])
+                        .split(frame.area());
+
+                    // PTY in main area
                     let pseudo_term = PseudoTerminal::new(app.focused_pty().screen());
-                    frame.render_widget(pseudo_term, frame.area());
+                    frame.render_widget(pseudo_term, chunks[0]);
+
+                    // Status line
+                    let status = format!(
+                        " PTY {}/{} | Ctrl+N/P: switch | Ctrl+Q: quit ",
+                        focused + 1,
+                        count
+                    );
+                    let status_widget = Paragraph::new(status)
+                        .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+                    frame.render_widget(status_widget, chunks[1]);
                 })?;
             }
         }
