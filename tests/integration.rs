@@ -387,28 +387,22 @@ fn test_activity_detection() -> Result<()> {
         }
     }
 
-    // Wait for initial render - channels 2 and 3 may already have activity from shell startup
+    // Wait for initial render - activity detection uses 500ms settling, so startup
+    // output may not show as activity (it's filtered as transient changes)
     read_output(&mut reader, &mut parser, 1000);
 
     let screen = parser.screen().contents();
     println!("Initial screen: {:?}", screen);
 
-    // Sidebar shows #main (focused - no asterisk), #build *, #logs *
+    // Sidebar shows #main (focused - no asterisk)
     assert!(screen.contains("#main"), "Should show channel 'main' in sidebar");
     assert!(
         !screen.contains("#main *"),
         "Focused channel 'main' should not have activity asterisk"
     );
 
-    // Note: Other channels likely already have activity (*) from shell startup
-    // This actually proves activity detection is working!
-    // Check that at least one of the unfocused channels shows activity
-    let has_activity = screen.contains("#build *") || screen.contains("#logs *");
-    assert!(
-        has_activity,
-        "At least one unfocused channel should have activity from shell startup, got: {}",
-        screen
-    );
+    // Note: With content-based activity settling (500ms), startup output may be
+    // filtered as transient. We'll generate real activity below instead.
 
     // Switch to channel 2 'build' (clears its activity)
     writer.write_all(&[0x02])?; // Ctrl+B (leader mode)
