@@ -4,88 +4,59 @@ A multi-agent coordination TUI. Pronounced "busy."
 
 ## What This Is
 
-An office building for agents. Channels are floors. Each floor has a common area (chat) and workspaces (terminals where agents do actual work). You're the building manager with a view of every floor.
+An office building for agents. Channels are floors. Each floor has a break room (chat) and workspaces (shells where agents actually do things). You're the building manager, watching the whole tower from the lobby.
 
 Think Slack, but:
-- Every participant can have an observable workspace
+- For your terminal
 - Channels contain both communication AND active work sessions
-- You live here too — your shell, your neovim, your whatever
-- Agents have persistent identities that move between floors, not disposable sessions
+- You live here too — spin up neovim, run commands, whatever
+- Mobile-friendly via floating panes that collapse to a hamburger
 
 ## Mental Model
 
 ```
-bz (the office building)
-│
-├── #exocortex (floor)
-│   ├── Common area (chat)
-│   ├── Kevin's workspace (shell)
-│   └── Exo's workspace (claude code)
-│
-├── #wicket (floor)
-│   ├── Common area (chat)
-│   ├── Kevin's workspace (shell)
-│   └── Delegate's workspace
-│
-├── #fort-nix (floor)
-│   ├── Common area (chat)
-│   └── Kevin's workspace (shell)
-│
-└── DMs (@kevin ↔ @exo)
+bz
+├── #fort-nix
+│   ├── chat (IRC/Matrix TUI)
+│   ├── workspace: claude
+│   └── workspace: opencode
+├── #exocortex
+│   ├── chat
+│   └── workspace: claude
+├── #wicket
+│   ├── chat
+│   └── workspace: claude
+└── @kevin ↔ @exo (DMs)
 ```
 
-Channels generally correspond to repos/projects. Exo primarily works in #exocortex but can be pulled into #wicket when needed.
+The sidebar shows all channels. Unread indicators. Bold when there's activity. Cmd+k to switch. On mobile, the sidebar collapses to a floating 󰍜 that expands on tap.
 
-## Agent Identity
+## Persona Supervision
 
-Agents aren't "a Claude session" — they're persistent identities with:
-- **Persona**: Who they are (Exo is Kevin's chief of staff)
-- **Role**: How they act in context
-- **Continuity**: Memory of what they were doing, context when switching
+One persona, one attention thread. Exo can exist in #exocortex and #fort-nix, but not simultaneously typing in both — that's uncanny.
 
-One agent, one attention thread. Exo doesn't simultaneously exist in two places with fragmented context. She's either working in #exocortex or she's been pulled to #wicket — never both.
+When you @-mention someone or DM them:
+1. Persona supervisor catches the interrupt
+2. Pauses their current work (with saved context)
+3. Switches their attention to the new channel
+4. Injects context: "You were doing X, User needs you here"
+5. After responding, supervisor decides: resume previous work or stay
 
-## Supervision & Interrupts
+Interrupt and resumption behavior can be per-persona.
 
-Each agent has an invisible supervisor (actor model) that:
-1. Monitors for @mentions and DMs across all channels
-2. Knows what the agent is currently doing (observable workspace)
-3. Manages interrupts based on configured urgency
-4. Provides context when switching: "You were filing the Q3 report when Kevin pinged you about X"
-5. Handles resume logic after the interrupt is resolved
+## Technical Direction
 
-Interruptability is configurable per-agent. Some agents drop everything immediately; others finish their current task first.
-
-## User Observability
-
-The workspaces aren't just for agents — they're for you. At any time you can:
-- Watch what any agent is doing in real-time
-- Approve actions, pause work, give feedback
-- Take over a workspace if needed
-- Adjust the trust dial from fully-supervised to autonomous
-
-## Mobile Access
-
-The TUI is the full experience, but chat is accessible from anywhere. Point a Matrix client at the server, and you can:
-- Check in on conversations
-- Ping agents: "@exo, status update on the migration?"
-- Quick capture tasks
-- Stay connected without needing terminal access
-
-You won't have workspace visibility, but you'll have comms.
-
-## Technical Stack
-
-- **Rust TUI** with ratatui (custom-built, not wrapping tmux/zellij)
-- **Session daemon (bzd)** for persistence across detach/attach
-- **Matrix (planned)** as the comms backbone — not bolted-on chat, but the nervous system
+- **Zellij** as the multiplexer base (not tmux — clean slate on bindings, better floating panes)
+- **IRC or Matrix** as chat transport (prefer standards over rolling our own)
+- **Declarative layouts** via zellij KDL files
+- Channels = zellij sessions, workspaces = windows within sessions
 
 ## Why "bz"
 
 - Reads as "busy" — the sound of work happening
-- Short, typeable: `bz`, `bz stop`, `bz --takeover`
-- Originally from "bitizen" (Tiny Tower reference)
+- Short, typeable, `bz switch #fort-nix` feels right
+- Tiny Tower reference that nobody will get
 
 ## Status
 
-TUI validated and daily-driven. Session persistence working. Comms layer next.
+Concept. The TUI feel is the thing to validate first — if it doesn't feel right, the transport layer doesn't matter.

@@ -10,23 +10,18 @@ pub type ChannelId = usize;
 
 /// A channel is a named workspace with one or more PTYs
 pub struct Channel {
-    /// Unique identifier (reserved for future use)
-    #[allow(dead_code)]
+    /// Unique identifier
     pub id: ChannelId,
     /// Display name
     pub name: String,
     /// The PTY for this channel (currently one per channel)
     pub pty: Pty,
-    /// Command used to spawn the PTY (for restart)
-    pub command: String,
-    /// Working directory (for restart)
-    pub cwd: Option<String>,
 }
 
 impl Channel {
     /// Create a new channel with a single PTY
-    pub fn new(id: ChannelId, name: String, pty: Pty, command: String, cwd: Option<String>) -> Self {
-        Self { id, name, pty, command, cwd }
+    pub fn new(id: ChannelId, name: String, pty: Pty) -> Self {
+        Self { id, name, pty }
     }
 
     /// Get the channel's activity state

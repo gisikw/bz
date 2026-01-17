@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 # TUI framework
-ratatui = "0.30"
+ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 
 # Async runtime
@@ -15,16 +15,12 @@ tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 
 # PTY and terminal emulation
+tui-term = "0.2"
 portable-pty = "0.9"
-vt100 = "0.16"
+vt100 = "0.15"
 
 # Error handling
 color-eyre = "0.6"
-
-# Session persistence
-bincode = "1.3"
-uuid = { version = "1", features = ["v4"] }
-libc = "0.2"
 
 # Config (Phase 4, but include now to avoid churn)
 serde = { version = "1", features = ["derive"] }
@@ -33,15 +29,7 @@ dirs = "5"
 
 [dev-dependencies]
 portable-pty = "0.9"
-vt100 = "0.16"
-
-[[bin]]
-name = "bz"
-path = "src/main.rs"
-
-[[bin]]
-name = "bzd"
-path = "src/bin/bzd.rs"
+vt100 = "0.15"
 
 [profile.release]
 strip = true
