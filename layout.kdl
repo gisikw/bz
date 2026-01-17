@@ -1,0 +1,45 @@
+// bz layout - channels as tabs, each with sidebar + workspace
+// No tab bar, no status bar - we use our own sidebar
+
+layout {
+    // Define our channels as tabs
+    tab name="fort-nix" focus=true cwd="/home/dev/Projects/fort-nix" {
+        pane split_direction="vertical" {
+            pane size=16 borderless=true name="sidebar" {
+                command "bash"
+                args "-c" "$BZ_ROOT/scripts/sidebar.sh"
+            }
+            pane name="workspace" focus=true
+        }
+    }
+
+    tab name="exocortex" cwd="/home/dev/Projects/exocortex" {
+        pane split_direction="vertical" {
+            pane size=16 borderless=true name="sidebar" {
+                command "bash"
+                args "-c" "$BZ_ROOT/scripts/sidebar.sh"
+            }
+            pane name="workspace" focus=true
+        }
+    }
+
+    tab name="wicket" cwd="/home/dev/Projects/wicket" {
+        pane split_direction="vertical" {
+            pane size=16 borderless=true name="sidebar" {
+                command "bash"
+                args "-c" "$BZ_ROOT/scripts/sidebar.sh"
+            }
+            pane name="workspace" focus=true
+        }
+    }
+
+    tab name="bz" cwd="/home/dev/Projects/bz" {
+        pane split_direction="vertical" {
+            pane size=16 borderless=true name="sidebar" {
+                command "bash"
+                args "-c" "$BZ_ROOT/scripts/sidebar.sh"
+            }
+            pane name="workspace" focus=true
+        }
+    }
+}

@@ -1,0 +1,10 @@
+# Test fixture config for integration tests
+
+[[channel]]
+name = "main"
+
+[[channel]]
+name = "build"
+
+[[channel]]
+name = "logs"

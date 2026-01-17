@@ -1,0 +1,18 @@
+# bz configuration
+#
+# Place this file in:
+# - ./bz.toml (project-local, takes precedence)
+# - ~/.config/bz/config.toml (user config)
+
+# Each [[channel]] block defines a named workspace with its own shell.
+
+[[channel]]
+name = "main"
+# cwd = "/path/to/project"  # optional, defaults to current directory
+# command = "bash"          # optional, defaults to $SHELL
+
+[[channel]]
+name = "build"
+
+[[channel]]
+name = "logs"

@@ -1,0 +1,63 @@
+name: Mirror
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  mirror:
+    runs-on: nixos
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan for PII
+        run: |
+          # Fetch denylist from fort-nix (source of truth)
+          PII_DENYLIST_URL="https://git.gisi.network/infra/fort-nix/raw/branch/main/clusters/bedlam/pii-denylist.age"
+          
+          if curl -sf "$PII_DENYLIST_URL" -o /tmp/pii-denylist.age; then
+            echo "$CI_AGE_KEY" > /tmp/ci-age-key.txt
+            trap 'rm -f /tmp/ci-age-key.txt /tmp/pii-denylist.age' EXIT
+
+            age -d -i /tmp/ci-age-key.txt /tmp/pii-denylist.age > /tmp/pii-patterns.txt
+
+            found=0
+            while IFS= read -r pattern; do
+              [ -z "$pattern" ] && continue
+              [[ "$pattern" =~ ^# ]] && continue
+              if grep -rliE "\b${pattern}\b" --include="*.nix" --include="*.md" --include="*.txt" . 2>/dev/null; then
+                echo "::error::PII pattern detected: $pattern"
+                found=1
+              fi
+            done < /tmp/pii-patterns.txt
+            rm -f /tmp/pii-patterns.txt
+
+            if [ "$found" -eq 1 ]; then
+              echo "::error::PII detected - blocking mirror"
+              exit 1
+            fi
+            echo "PII scan passed"
+          else
+            echo "::warning::Could not fetch PII denylist"
+          fi
+        env:
+          CI_AGE_KEY: ${{ secrets.CI_AGE_KEY }}
+
+      - name: Push to GitHub mirror
+        run: |
+          echo "$CI_AGE_KEY" > /tmp/ci-age-key.txt
+          trap 'rm -f /tmp/ci-age-key.txt' EXIT
+
+          # Fetch mirror token from fort-nix
+          TOKEN_URL="https://git.gisi.network/infra/fort-nix/raw/branch/main/clusters/bedlam/github-mirror-token.age"
+          curl -sf "$TOKEN_URL" -o /tmp/mirror-token.age
+          GITHUB_TOKEN=$(age -d -i /tmp/ci-age-key.txt /tmp/mirror-token.age)
+          rm -f /tmp/mirror-token.age
+
+          REPO_NAME="${GITHUB_REPOSITORY##*/}"
+          echo "Pushing main to GitHub mirror..."
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/gisikw/${REPO_NAME}.git" main:main
+
+          echo "Mirror sync complete"
+        env:
+          CI_AGE_KEY: ${{ secrets.CI_AGE_KEY }}
