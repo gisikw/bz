@@ -468,3 +468,89 @@ fn test_activity_detection() -> Result<()> {
 
     Ok(())
 }
+
+/// Test: sidebar auto-hides on narrow (mobile) terminals
+#[test]
+fn test_sidebar_hides_on_mobile() -> Result<()> {
+    use portable_pty::{native_pty_system, PtySize};
+    use std::io::{Read, Write};
+    use std::sync::mpsc;
+
+    println!("Creating narrow PTY (80 cols = mobile)...");
+    let pty_system = native_pty_system();
+    let pair = pty_system.openpty(PtySize {
+        rows: 24,
+        cols: 80, // Below MOBILE_WIDTH_THRESHOLD (100)
+        pixel_width: 0,
+        pixel_height: 0,
+    })?;
+
+    println!("Spawning bz...");
+    let mut cmd = portable_pty::CommandBuilder::new(bz_binary());
+    cmd.env("TERM", "xterm-256color");
+    let mut child = pair.slave.spawn_command(cmd)?;
+
+    let mut reader = pair.master.try_clone_reader()?;
+    let mut writer = pair.master.take_writer()?;
+    let mut parser = vt100::Parser::new(24, 80, 0);
+
+    // Read output in a thread
+    println!("Reading output...");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let _ = tx.send(buf[..n].to_vec());
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Wait for bz to render
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Process all output
+    while let Ok(data) = rx.try_recv() {
+        parser.process(&data);
+    }
+
+    let screen = parser.screen().contents();
+    println!("Mobile screen: {:?}", screen);
+
+    // Sidebar should NOT be visible - no channel names
+    assert!(
+        !screen.contains("#main"),
+        "Sidebar should be hidden on narrow terminal (80 cols)"
+    );
+
+    // Status line should still be visible
+    assert!(
+        screen.contains("^K search") || screen.contains("^B leader"),
+        "Status line should be visible"
+    );
+
+    // Quit
+    writer.write_all(&[0x02])?; // Ctrl+B
+    writer.flush()?;
+    std::thread::sleep(Duration::from_millis(100));
+    writer.write_all(&[b'q'])?;
+    writer.flush()?;
+
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            assert!(status.success(), "Process should exit successfully");
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(2) {
+            panic!("Process did not exit after Ctrl+B q");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    Ok(())
+}
