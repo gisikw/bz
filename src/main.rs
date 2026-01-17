@@ -67,7 +67,13 @@ impl App {
     fn from_config(config: &Config, rows: u16, cols: u16) -> Result<Self> {
         use crate::pty::Pty;
 
-        let pty_cols = cols.saturating_sub(SIDEBAR_WIDTH);
+        // Auto-hide sidebar on narrow terminals
+        let show_sidebar = cols >= MOBILE_WIDTH_THRESHOLD;
+        let pty_cols = if show_sidebar {
+            cols.saturating_sub(SIDEBAR_WIDTH)
+        } else {
+            cols
+        };
         let mut channels = Vec::with_capacity(config.channel.len());
         for (id, ch_config) in config.channel.iter().enumerate() {
             let pty = Pty::spawn(
@@ -90,7 +96,7 @@ impl App {
             focused: 0,
             input_mode: InputMode::default(),
             picker: None,
-            show_sidebar: true,
+            show_sidebar,
         })
     }
 

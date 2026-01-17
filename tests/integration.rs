@@ -30,7 +30,7 @@ fn test_bz_spawns_shell_and_renders() -> Result<()> {
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
         rows: 24,
-        cols: 80,
+        cols: 120,
         pixel_width: 0,
         pixel_height: 0,
     })?;
@@ -42,7 +42,7 @@ fn test_bz_spawns_shell_and_renders() -> Result<()> {
 
     let mut reader = pair.master.try_clone_reader()?;
     let mut writer = pair.master.take_writer()?;
-    let mut parser = vt100::Parser::new(24, 80, 0);
+    let mut parser = vt100::Parser::new(24, 120, 0);
 
     // Read output in a thread, collecting all data for a period
     // Give more time for shell to initialize
@@ -120,7 +120,7 @@ fn test_input_forwarding() -> Result<()> {
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
         rows: 24,
-        cols: 80,
+        cols: 120,
         pixel_width: 0,
         pixel_height: 0,
     })?;
@@ -131,7 +131,7 @@ fn test_input_forwarding() -> Result<()> {
 
     let mut reader = pair.master.try_clone_reader()?;
     let mut writer = pair.master.take_writer()?;
-    let mut parser = vt100::Parser::new(24, 80, 0);
+    let mut parser = vt100::Parser::new(24, 120, 0);
 
     // Wait for shell to start and show prompt
     std::thread::sleep(Duration::from_millis(500));
@@ -226,7 +226,7 @@ fn test_tab_switching() -> Result<()> {
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
         rows: 24,
-        cols: 80,
+        cols: 120,
         pixel_width: 0,
         pixel_height: 0,
     })?;
@@ -239,7 +239,7 @@ fn test_tab_switching() -> Result<()> {
 
     let mut reader = pair.master.try_clone_reader()?;
     let mut writer = pair.master.take_writer()?;
-    let mut parser = vt100::Parser::new(24, 80, 0);
+    let mut parser = vt100::Parser::new(24, 120, 0);
 
     // Helper to read and parse output
     fn read_output(reader: &mut Box<dyn Read + Send>, parser: &mut vt100::Parser, ms: u64) {
@@ -360,7 +360,7 @@ fn test_activity_detection() -> Result<()> {
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
         rows: 24,
-        cols: 80,
+        cols: 120,
         pixel_width: 0,
         pixel_height: 0,
     })?;
@@ -373,7 +373,7 @@ fn test_activity_detection() -> Result<()> {
 
     let mut reader = pair.master.try_clone_reader()?;
     let mut writer = pair.master.take_writer()?;
-    let mut parser = vt100::Parser::new(24, 80, 0);
+    let mut parser = vt100::Parser::new(24, 120, 0);
 
     fn read_output(reader: &mut Box<dyn Read + Send>, parser: &mut vt100::Parser, ms: u64) {
         let mut buf = [0u8; 4096];
