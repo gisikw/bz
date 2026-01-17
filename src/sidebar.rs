@@ -12,6 +12,7 @@ use ratatui::{
 };
 
 use crate::channel::Channel;
+use crate::picker::{HasNameActivity, HasPtyStatus};
 use crate::pty::{ActivityState, PtyStatus};
 
 /// Width of the sidebar in columns
@@ -102,6 +103,111 @@ impl Widget for Sidebar<'_> {
                 }
 
                 // Style based on focus/activity/exit status
+                let style = if is_focused {
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_exited {
+                    Style::default().fg(Color::Red)
+                } else if matches!(activity, ActivityState::Active(_)) {
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+
+                ListItem::new(Line::from(spans)).style(style)
+            })
+            .collect();
+
+        let version = concat!(" bz v", env!("CARGO_PKG_VERSION"), " ");
+        let block = Block::default()
+            .title(version)
+            .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            .borders(Borders::RIGHT)
+            .border_style(Style::default().fg(Color::DarkGray));
+
+        let list = List::new(items).block(block);
+
+        Widget::render(list, area, buf);
+    }
+}
+
+impl Sidebar<'_> {
+    /// Create sidebar from session channels
+    pub fn from_session_channels<'a, T: HasNameActivity + HasPtyStatus>(
+        channels: &'a [T],
+        focused: usize,
+    ) -> SessionSidebar<'a, T> {
+        SessionSidebar { channels, focused }
+    }
+}
+
+/// Generic sidebar for session channels
+pub struct SessionSidebar<'a, T: HasNameActivity + HasPtyStatus> {
+    channels: &'a [T],
+    focused: usize,
+}
+
+impl<T: HasNameActivity + HasPtyStatus> Widget for SessionSidebar<'_, T> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let items: Vec<ListItem> = self
+            .channels
+            .iter()
+            .enumerate()
+            .map(|(i, ch)| {
+                let is_focused = i == self.focused;
+                let activity = ch.activity();
+
+                let prefix = if is_focused {
+                    format!(" {} ", ICON_FOCUSED)
+                } else {
+                    "   ".to_string()
+                };
+
+                let mut spans = vec![
+                    Span::styled(
+                        prefix,
+                        if is_focused {
+                            Style::default().fg(Color::Cyan)
+                        } else {
+                            Style::default()
+                        },
+                    ),
+                    Span::styled(
+                        ICON_CHANNEL,
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::raw(ch.name()),
+                ];
+
+                let is_exited = *ch.pty_status() == PtyStatus::Exited;
+                if is_exited {
+                    spans.push(Span::styled(
+                        format!(" {}", ICON_EXITED),
+                        Style::default().fg(Color::Red),
+                    ));
+                } else {
+                    match activity {
+                        ActivityState::Idle | ActivityState::Pending { .. } => {}
+                        ActivityState::Active(0) => {
+                            spans.push(Span::styled(
+                                format!(" {}", ICON_ACTIVITY),
+                                Style::default().fg(Color::Yellow),
+                            ));
+                        }
+                        ActivityState::Active(n) => {
+                            spans.push(Span::styled(
+                                format!(" {} {}", ICON_BELL, n),
+                                Style::default()
+                                    .fg(Color::Red)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                        }
+                    }
+                }
+
                 let style = if is_focused {
                     Style::default()
                         .fg(Color::White)

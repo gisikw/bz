@@ -9,9 +9,14 @@
 //!
 //! To skip in CI: cargo test --test integration -- --ignored
 
+use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+/// Counter for unique test session directories
+static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Get the path to the bz binary
 fn bz_binary() -> String {
@@ -19,12 +24,42 @@ fn bz_binary() -> String {
     format!("{}/target/debug/bz", manifest_dir)
 }
 
-/// Test: spawn bz, verify shell renders, send Ctrl+B q to quit
+/// Get the directory containing both bz and bzd binaries
+fn binary_dir() -> String {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    format!("{}/target/debug", manifest_dir)
+}
+
+/// Get a unique session directory for this test to avoid conflicts
+fn test_session_dir() -> String {
+    let count = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    format!("/tmp/bz-test-{}-{}", pid, count)
+}
+
+/// Clean up a test session directory
+fn cleanup_session_dir(session_dir: &str) {
+    // Stop any daemon in this session dir
+    let _ = Command::new(bz_binary())
+        .arg("stop")
+        .env("PATH", format!("{}:{}", binary_dir(), std::env::var("PATH").unwrap_or_default()))
+        .env("BZ_SESSION_DIR", session_dir)
+        .output();
+    // Give it a moment to clean up
+    std::thread::sleep(Duration::from_millis(100));
+    // Remove the directory
+    let _ = std::fs::remove_dir_all(session_dir);
+}
+
+/// Test: spawn bz, verify shell renders, send Ctrl+B q to detach
 #[test]
 fn test_bz_spawns_shell_and_renders() -> Result<()> {
     use portable_pty::{native_pty_system, PtySize};
     use std::io::{Read, Write};
     use std::sync::mpsc;
+
+    // Use isolated session directory
+    let session_dir = test_session_dir();
 
     println!("Creating PTY...");
     let pty_system = native_pty_system();
@@ -38,6 +73,11 @@ fn test_bz_spawns_shell_and_renders() -> Result<()> {
     println!("Spawning bz...");
     let mut cmd = portable_pty::CommandBuilder::new(bz_binary());
     cmd.env("TERM", "xterm-256color");
+    // Add bzd to PATH so bz can spawn the daemon
+    let path = format!("{}:{}", binary_dir(), std::env::var("PATH").unwrap_or_default());
+    cmd.env("PATH", path);
+    // Use isolated session directory to avoid conflicts
+    cmd.env("BZ_SESSION_DIR", &session_dir);
     let mut child = pair.slave.spawn_command(cmd)?;
 
     let mut reader = pair.master.try_clone_reader()?;
@@ -85,12 +125,16 @@ fn test_bz_spawns_shell_and_renders() -> Result<()> {
         }
     }
 
-    // Send Ctrl+B q to quit (leader mode)
-    // Need a small delay between leader key and command for event loop to process them separately
+    // Send Ctrl+B q to detach (leader mode)
+    // Note: In session mode, q = detach (client exits, daemon stays)
+    // This now shows a confirmation modal, so we need to confirm with 'y'
     writer.write_all(&[0x02])?; // Ctrl+B enters leader mode
     writer.flush()?;
     std::thread::sleep(Duration::from_millis(100));
-    writer.write_all(&[b'q'])?; // q quits
+    writer.write_all(&[b'q'])?; // q shows quit confirmation
+    writer.flush()?;
+    std::thread::sleep(Duration::from_millis(100));
+    writer.write_all(&[b'y'])?; // y confirms quit
     writer.flush()?;
 
     // Wait for process to exit (with timeout)
@@ -102,10 +146,13 @@ fn test_bz_spawns_shell_and_renders() -> Result<()> {
             break;
         }
         if start.elapsed() > Duration::from_secs(2) {
-            panic!("Process did not exit within 2 seconds after Ctrl+Q was sent");
+            panic!("Process did not exit within 2 seconds after Ctrl+B q was sent");
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+
+    // Clean up session
+    cleanup_session_dir(&session_dir);
 
     Ok(())
 }
@@ -117,6 +164,9 @@ fn test_input_forwarding() -> Result<()> {
     use std::io::{Read, Write};
     use std::sync::mpsc;
 
+    // Use isolated session directory
+    let session_dir = test_session_dir();
+
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
         rows: 24,
@@ -127,6 +177,11 @@ fn test_input_forwarding() -> Result<()> {
 
     let mut cmd = portable_pty::CommandBuilder::new(bz_binary());
     cmd.env("TERM", "xterm-256color");
+    // Add bzd to PATH so bz can spawn the daemon
+    let path = format!("{}:{}", binary_dir(), std::env::var("PATH").unwrap_or_default());
+    cmd.env("PATH", path);
+    // Use isolated session directory to avoid conflicts
+    cmd.env("BZ_SESSION_DIR", &session_dir);
     let mut child = pair.slave.spawn_command(cmd)?;
 
     let mut reader = pair.master.try_clone_reader()?;
@@ -193,12 +248,14 @@ fn test_input_forwarding() -> Result<()> {
         "Process should still be running"
     );
 
-    // Send Ctrl+B q to quit (leader mode)
-    // Need a small delay between leader key and command for event loop to process them separately
+    // Send Ctrl+B q to detach (leader mode) + confirm
     writer.write_all(&[0x02])?; // Ctrl+B enters leader mode
     writer.flush()?;
     std::thread::sleep(Duration::from_millis(100));
-    writer.write_all(&[b'q'])?; // q quits
+    writer.write_all(&[b'q'])?; // q shows quit confirmation
+    writer.flush()?;
+    std::thread::sleep(Duration::from_millis(100));
+    writer.write_all(&[b'y'])?; // y confirms quit
     writer.flush()?;
 
     // Wait for exit
@@ -209,10 +266,13 @@ fn test_input_forwarding() -> Result<()> {
             break;
         }
         if start.elapsed() > Duration::from_secs(2) {
-            panic!("Process did not exit after Ctrl+Q");
+            panic!("Process did not exit after Ctrl+B q");
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+
+    // Clean up session
+    cleanup_session_dir(&session_dir);
 
     Ok(())
 }
@@ -222,6 +282,9 @@ fn test_input_forwarding() -> Result<()> {
 fn test_tab_switching() -> Result<()> {
     use portable_pty::{native_pty_system, PtySize};
     use std::io::{Read, Write};
+
+    // Use isolated session directory
+    let session_dir = test_session_dir();
 
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
@@ -233,6 +296,11 @@ fn test_tab_switching() -> Result<()> {
 
     let mut cmd = portable_pty::CommandBuilder::new(bz_binary());
     cmd.env("TERM", "xterm-256color");
+    // Add bzd to PATH so bz can spawn the daemon
+    let path = format!("{}:{}", binary_dir(), std::env::var("PATH").unwrap_or_default());
+    cmd.env("PATH", path);
+    // Use isolated session directory to avoid conflicts
+    cmd.env("BZ_SESSION_DIR", &session_dir);
     // Set CWD to test fixtures where test bz.toml exists
     cmd.cwd(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"));
     let mut child = pair.slave.spawn_command(cmd)?;
@@ -329,11 +397,14 @@ fn test_tab_switching() -> Result<()> {
         screen
     );
 
-    // Quit (Ctrl+B q - leader mode)
+    // Detach (Ctrl+B q - leader mode) + confirm
     writer.write_all(&[0x02])?;
     writer.flush()?;
     std::thread::sleep(Duration::from_millis(100));
     writer.write_all(&[b'q'])?;
+    writer.flush()?;
+    std::thread::sleep(Duration::from_millis(100));
+    writer.write_all(&[b'y'])?; // confirm quit
     writer.flush()?;
 
     let start = std::time::Instant::now();
@@ -348,6 +419,9 @@ fn test_tab_switching() -> Result<()> {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    // Clean up session
+    cleanup_session_dir(&session_dir);
+
     Ok(())
 }
 
@@ -356,6 +430,9 @@ fn test_tab_switching() -> Result<()> {
 fn test_activity_detection() -> Result<()> {
     use portable_pty::{native_pty_system, PtySize};
     use std::io::{Read, Write};
+
+    // Use isolated session directory
+    let session_dir = test_session_dir();
 
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
@@ -367,6 +444,11 @@ fn test_activity_detection() -> Result<()> {
 
     let mut cmd = portable_pty::CommandBuilder::new(bz_binary());
     cmd.env("TERM", "xterm-256color");
+    // Add bzd to PATH so bz can spawn the daemon
+    let path = format!("{}:{}", binary_dir(), std::env::var("PATH").unwrap_or_default());
+    cmd.env("PATH", path);
+    // Use isolated session directory to avoid conflicts
+    cmd.env("BZ_SESSION_DIR", &session_dir);
     // Set CWD to test fixtures where test bz.toml exists
     cmd.cwd(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"));
     let mut child = pair.slave.spawn_command(cmd)?;
@@ -447,11 +529,14 @@ fn test_activity_detection() -> Result<()> {
     // Now if 'build' has any new output, it should get an activity marker
     // We can't easily trigger that in this test, but the core mechanism works
 
-    // Quit (Ctrl+B q - leader mode)
+    // Detach (Ctrl+B q - leader mode) + confirm
     writer.write_all(&[0x02])?;
     writer.flush()?;
     std::thread::sleep(Duration::from_millis(100));
     writer.write_all(&[b'q'])?;
+    writer.flush()?;
+    std::thread::sleep(Duration::from_millis(100));
+    writer.write_all(&[b'y'])?; // confirm quit
     writer.flush()?;
 
     let start = std::time::Instant::now();
@@ -466,6 +551,9 @@ fn test_activity_detection() -> Result<()> {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    // Clean up session
+    cleanup_session_dir(&session_dir);
+
     Ok(())
 }
 
@@ -475,6 +563,9 @@ fn test_sidebar_hides_on_mobile() -> Result<()> {
     use portable_pty::{native_pty_system, PtySize};
     use std::io::{Read, Write};
     use std::sync::mpsc;
+
+    // Use isolated session directory
+    let session_dir = test_session_dir();
 
     println!("Creating narrow PTY (80 cols = mobile)...");
     let pty_system = native_pty_system();
@@ -488,6 +579,11 @@ fn test_sidebar_hides_on_mobile() -> Result<()> {
     println!("Spawning bz...");
     let mut cmd = portable_pty::CommandBuilder::new(bz_binary());
     cmd.env("TERM", "xterm-256color");
+    // Add bzd to PATH so bz can spawn the daemon
+    let path = format!("{}:{}", binary_dir(), std::env::var("PATH").unwrap_or_default());
+    cmd.env("PATH", path);
+    // Use isolated session directory to avoid conflicts
+    cmd.env("BZ_SESSION_DIR", &session_dir);
     let mut child = pair.slave.spawn_command(cmd)?;
 
     let mut reader = pair.master.try_clone_reader()?;
@@ -533,11 +629,14 @@ fn test_sidebar_hides_on_mobile() -> Result<()> {
         "Status line should be visible"
     );
 
-    // Quit
+    // Detach + confirm
     writer.write_all(&[0x02])?; // Ctrl+B
     writer.flush()?;
     std::thread::sleep(Duration::from_millis(100));
     writer.write_all(&[b'q'])?;
+    writer.flush()?;
+    std::thread::sleep(Duration::from_millis(100));
+    writer.write_all(&[b'y'])?; // confirm quit
     writer.flush()?;
 
     let start = std::time::Instant::now();
@@ -551,6 +650,9 @@ fn test_sidebar_hides_on_mobile() -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+
+    // Clean up session
+    cleanup_session_dir(&session_dir);
 
     Ok(())
 }

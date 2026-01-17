@@ -18,7 +18,7 @@ use ratatui::{
 };
 
 use crate::channel::Channel;
-use crate::pty::ActivityState;
+use crate::pty::{ActivityState, PtyStatus};
 
 // UI icons (pure Unicode for maximum compatibility)
 const ICON_SEARCH: &str = ">";
@@ -133,6 +133,83 @@ impl Picker {
         self.selected = 0; // Reset selection on query change
         self.update_filter(channels);
     }
+
+    // ===== SessionChannel variants (for session-backed mode) =====
+
+    /// Update filter for types implementing name/activity interface
+    pub fn update_filter_from_channels<T: HasNameActivity>(&mut self, channels: &[T]) {
+        if self.query.is_empty() {
+            self.filtered = channels
+                .iter()
+                .enumerate()
+                .filter(|(_, ch)| matches!(ch.activity(), ActivityState::Active(_)))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|(i, _)| i)
+                .collect();
+
+            self.filtered.sort_by(|&a, &b| {
+                let a_ch = &channels[a];
+                let b_ch = &channels[b];
+
+                let a_bells = match a_ch.activity() {
+                    ActivityState::Active(n) if *n > 0 => *n,
+                    _ => 0,
+                };
+                let b_bells = match b_ch.activity() {
+                    ActivityState::Active(n) if *n > 0 => *n,
+                    _ => 0,
+                };
+
+                match b_bells.cmp(&a_bells) {
+                    std::cmp::Ordering::Equal => a_ch.name().cmp(b_ch.name()),
+                    other => other,
+                }
+            });
+        } else {
+            let query_lower = self.query.to_lowercase();
+            self.filtered = channels
+                .iter()
+                .enumerate()
+                .filter(|(_, ch)| ch.name().to_lowercase().contains(&query_lower))
+                .map(|(i, _)| i)
+                .collect();
+        }
+
+        if self.selected >= self.filtered.len() {
+            self.selected = self.filtered.len().saturating_sub(1);
+        }
+    }
+
+    /// Get selected channel for generic channel types
+    pub fn selected_channel_from_channels<T>(&self, _channels: &[T]) -> Option<usize> {
+        self.filtered.get(self.selected).copied()
+    }
+
+    /// Push char for generic channel types
+    pub fn push_char_from_channels<T: HasNameActivity>(&mut self, c: char, channels: &[T]) {
+        self.query.push(c);
+        self.selected = 0;
+        self.update_filter_from_channels(channels);
+    }
+
+    /// Pop char for generic channel types
+    pub fn pop_char_from_channels<T: HasNameActivity>(&mut self, channels: &[T]) {
+        self.query.pop();
+        self.selected = 0;
+        self.update_filter_from_channels(channels);
+    }
+}
+
+/// Trait for types that have a name and activity state
+pub trait HasNameActivity {
+    fn name(&self) -> &str;
+    fn activity(&self) -> &ActivityState;
+}
+
+/// Trait for types that have PTY status
+pub trait HasPtyStatus {
+    fn pty_status(&self) -> &PtyStatus;
 }
 
 /// Picker widget for rendering
@@ -243,6 +320,122 @@ impl Widget for PickerWidget<'_> {
         };
 
         // Use rounded border set for bottom part too
+        let mut bottom_border = border::ROUNDED;
+        bottom_border.top_left = border::ROUNDED.vertical_left;
+        bottom_border.top_right = border::ROUNDED.vertical_right;
+
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                .border_set(bottom_border)
+                .border_style(Style::default().fg(Color::Cyan))
+                .style(Style::default().bg(Color::Black)),
+        );
+        list.render(chunks[1], buf);
+    }
+}
+
+impl PickerWidget<'_> {
+    /// Create picker widget for session channels
+    pub fn from_session_channels<'a, T: HasNameActivity>(picker: &'a Picker, channels: &'a [T]) -> SessionPickerWidget<'a, T> {
+        SessionPickerWidget { picker, channels }
+    }
+}
+
+/// Generic picker widget for session channels
+pub struct SessionPickerWidget<'a, T: HasNameActivity> {
+    picker: &'a Picker,
+    channels: &'a [T],
+}
+
+impl<'a, T: HasNameActivity> Widget for SessionPickerWidget<'a, T> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let picker_width = 50.min(area.width.saturating_sub(4));
+        let picker_height = 14.min(area.height.saturating_sub(4));
+        let x = area.x + (area.width.saturating_sub(picker_width)) / 2;
+        let y = area.y + (area.height.saturating_sub(picker_height)) / 4;
+        let picker_area = Rect::new(x, y, picker_width, picker_height);
+
+        Clear.render(picker_area, buf);
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .split(picker_area);
+
+        let input_text = if self.picker.query.is_empty() {
+            format!(" {} Type to search...", ICON_SEARCH)
+        } else {
+            format!(" {} {}", ICON_SEARCH, self.picker.query)
+        };
+        let input_style = if self.picker.query.is_empty() {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let input = Paragraph::new(input_text)
+            .style(input_style)
+            .block(
+                Block::default()
+                    .title(" Switch Channel ")
+                    .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                    .borders(Borders::ALL)
+                    .border_set(border::ROUNDED)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .style(Style::default().bg(Color::Black)),
+            );
+        input.render(chunks[0], buf);
+
+        let items: Vec<ListItem> = if self.picker.filtered.is_empty() {
+            if self.picker.query.is_empty() {
+                vec![ListItem::new(format!("   {} No channels with activity", ICON_ACTIVITY)).style(
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                )]
+            } else {
+                vec![ListItem::new("   No matching channels").style(
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                )]
+            }
+        } else {
+            self.picker
+                .filtered
+                .iter()
+                .enumerate()
+                .map(|(i, &ch_idx)| {
+                    let ch = &self.channels[ch_idx];
+                    let is_selected = i == self.picker.selected;
+
+                    let prefix = if is_selected {
+                        format!(" {} ", ICON_SELECTED)
+                    } else {
+                        "   ".to_string()
+                    };
+
+                    let mut text = format!("{}{}{}", prefix, ICON_CHANNEL, ch.name());
+                    match ch.activity() {
+                        ActivityState::Active(n) if *n > 0 => {
+                            text.push_str(&format!("  {} {}", ICON_BELL, n));
+                        }
+                        ActivityState::Active(_) => {
+                            text.push_str(&format!("  {}", ICON_ACTIVITY));
+                        }
+                        _ => {}
+                    }
+
+                    let style = if is_selected {
+                        Style::default()
+                            .bg(Color::Rgb(40, 80, 120))
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+
+                    ListItem::new(text).style(style)
+                })
+                .collect()
+        };
+
         let mut bottom_border = border::ROUNDED;
         bottom_border.top_left = border::ROUNDED.vertical_left;
         bottom_border.top_right = border::ROUNDED.vertical_right;

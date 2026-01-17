@@ -1,10 +1,15 @@
 mod channel;
 mod config;
+mod daemon;
 mod picker;
+mod protocol;
 mod pty;
+mod session;
+mod session_pty;
 mod sidebar;
 mod terminal;
 
+use std::env;
 use std::io::{self, stdout};
 use std::time::Duration;
 
@@ -20,15 +25,19 @@ use crossterm::{
 use futures::StreamExt;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::Paragraph,
+    widgets::{Block, Borders, Clear, Paragraph},
     Terminal,
 };
-use crate::channel::Channel;
+use tokio::sync::mpsc;
+
 use crate::config::Config;
-use crate::picker::{Picker, PickerWidget};
-use crate::pty::PtyStatus;
+use crate::picker::{HasNameActivity, HasPtyStatus, Picker, PickerWidget};
+use crate::protocol::{ClientMessage, DaemonMessage};
+use crate::pty::{ActivityState, PtyStatus};
+use crate::session::{ConnectOptions, Session};
+use crate::session_pty::SessionPty;
 use crate::sidebar::{Sidebar, SIDEBAR_WIDTH};
 use crate::terminal::TerminalWidget;
 
@@ -45,10 +54,53 @@ pub enum InputMode {
     Leader,
 }
 
+/// A session-backed channel
+struct SessionChannel {
+    /// Display name
+    pub name: String,
+    /// The session-backed PTY
+    pub pty: SessionPty,
+    /// Command used to spawn the PTY (for display)
+    pub command: String,
+    /// Working directory (for display)
+    pub cwd: Option<String>,
+}
+
+impl SessionChannel {
+    fn new(name: String, pty: SessionPty, command: String, cwd: Option<String>) -> Self {
+        Self {
+            name,
+            pty,
+            command,
+            cwd,
+        }
+    }
+
+    fn clear_activity(&mut self) {
+        self.pty.clear_activity();
+    }
+}
+
+impl HasNameActivity for SessionChannel {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn activity(&self) -> &ActivityState {
+        &self.pty.activity
+    }
+}
+
+impl HasPtyStatus for SessionChannel {
+    fn pty_status(&self) -> &PtyStatus {
+        &self.pty.status
+    }
+}
+
 /// Application state
 struct App {
     /// All channels
-    channels: Vec<Channel>,
+    channels: Vec<SessionChannel>,
     /// Index of the currently focused channel
     focused: usize,
     /// Current input mode
@@ -57,63 +109,58 @@ struct App {
     picker: Option<Picker>,
     /// Whether to show the sidebar
     show_sidebar: bool,
+    /// Channel to send messages to session
+    session_tx: mpsc::Sender<ClientMessage>,
+    /// Whether quit confirmation is showing
+    quit_confirm: bool,
 }
 
 impl App {
-    /// Create app from configuration
-    ///
-    /// `rows` and `cols` are the full terminal dimensions. PTY width is
-    /// reduced by SIDEBAR_WIDTH.
-    fn from_config(config: &Config, rows: u16, cols: u16) -> Result<Self> {
-        use crate::pty::Pty;
-
-        // Auto-hide sidebar on narrow terminals
+    /// Create app from session
+    fn from_session(
+        session: &Session,
+        rows: u16,
+        cols: u16,
+        session_tx: mpsc::Sender<ClientMessage>,
+    ) -> Self {
         let show_sidebar = cols >= MOBILE_WIDTH_THRESHOLD;
         let pty_cols = if show_sidebar {
             cols.saturating_sub(SIDEBAR_WIDTH)
         } else {
             cols
         };
-        let mut channels = Vec::with_capacity(config.channel.len());
-        for (id, ch_config) in config.channel.iter().enumerate() {
-            let pty = Pty::spawn(
-                id,
-                rows,
-                pty_cols,
-                &ch_config.command,
-                ch_config.cwd.as_deref(),
-            )?;
-            channels.push(Channel::new(
-                id,
-                ch_config.name.clone(),
-                pty,
-                ch_config.command.clone(),
-                ch_config.cwd.clone(),
+
+        let mut channels = Vec::with_capacity(session.ptys().len());
+        for pty_info in session.ptys() {
+            let session_pty = SessionPty::new(pty_info.id, rows, pty_cols, session_tx.clone());
+            channels.push(SessionChannel::new(
+                pty_info.name.clone(),
+                session_pty,
+                pty_info.command.clone(),
+                pty_info.cwd.clone(),
             ));
         }
-        Ok(Self {
+
+        // Restore focused channel from session
+        let focused = session.info().focused.min(channels.len().saturating_sub(1));
+
+        Self {
             channels,
-            focused: 0,
+            focused,
             input_mode: InputMode::default(),
             picker: None,
             show_sidebar,
-        })
-    }
-
-    /// Get mutable reference to the focused channel
-    fn focused_channel(&mut self) -> &mut Channel {
-        &mut self.channels[self.focused]
-    }
-
-    /// Process output from all channels
-    fn process_all_output(&mut self) {
-        let focused = self.focused;
-        for (i, channel) in self.channels.iter_mut().enumerate() {
-            channel.process_output(i == focused);
+            session_tx,
+            quit_confirm: false,
         }
     }
 
-    /// Check pending activities and promote to Active if settled
+    /// Get mutable reference to the focused channel
+    fn focused_channel(&mut self) -> &mut SessionChannel {
+        &mut self.channels[self.focused]
+    }
+
+    /// Check pending activities
     fn check_pending_activities(&mut self) {
         for channel in &mut self.channels {
             channel.pty.check_pending_activity();
@@ -121,24 +168,22 @@ impl App {
     }
 
     /// Resize all PTYs
-    ///
-    /// `cols` should be the full terminal width - sidebar width is subtracted internally.
-    fn resize_all(&mut self, rows: u16, cols: u16) -> Result<()> {
+    fn resize_all(&mut self, rows: u16, cols: u16) {
         let pty_cols = if self.show_sidebar {
             cols.saturating_sub(SIDEBAR_WIDTH)
         } else {
             cols
         };
         for channel in &mut self.channels {
-            channel.pty.resize(rows, pty_cols)?;
+            channel.pty.resize(rows, pty_cols);
         }
-        Ok(())
     }
 
     /// Switch to next channel
     fn next_channel(&mut self) {
         self.focused = (self.focused + 1) % self.channels.len();
         self.channels[self.focused].clear_activity();
+        self.send_focus_update();
     }
 
     /// Switch to previous channel
@@ -149,6 +194,7 @@ impl App {
             self.focused -= 1;
         }
         self.channels[self.focused].clear_activity();
+        self.send_focus_update();
     }
 
     /// Switch to specific channel by index
@@ -156,30 +202,19 @@ impl App {
         if idx < self.channels.len() {
             self.focused = idx;
             self.channels[self.focused].clear_activity();
+            self.send_focus_update();
         }
     }
 
-    /// Restart the PTY for the focused channel
-    fn restart_focused_pty(&mut self, rows: u16, cols: u16) -> Result<()> {
-        use crate::pty::Pty;
+    /// Send focus update to daemon
+    fn send_focus_update(&self) {
+        let msg = ClientMessage::SetFocus { channel_idx: self.focused };
+        let _ = self.session_tx.try_send(msg);
+    }
 
-        let channel = &mut self.channels[self.focused];
-        let pty_cols = if self.show_sidebar {
-            cols.saturating_sub(SIDEBAR_WIDTH)
-        } else {
-            cols
-        };
-
-        let new_pty = Pty::spawn(
-            channel.id,
-            rows,
-            pty_cols,
-            &channel.command,
-            channel.cwd.as_deref(),
-        )?;
-
-        channel.pty = new_pty;
-        Ok(())
+    /// Get channel by PTY ID
+    fn get_channel_by_pty_id(&mut self, pty_id: usize) -> Option<&mut SessionChannel> {
+        self.channels.iter_mut().find(|c| c.pty.id == pty_id)
     }
 }
 
@@ -187,37 +222,98 @@ impl App {
 async fn main() -> Result<()> {
     color_eyre::install()?;
 
+    // Parse CLI args
+    let args: Vec<String> = env::args().collect();
+
+    // Handle subcommands
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "stop" => {
+                session::stop()?;
+                println!("Session stopped.");
+                return Ok(());
+            }
+            "sessions" => {
+                if let Some(socket) = daemon::find_session() {
+                    println!("Active session: {}", socket.display());
+                } else {
+                    println!("No active sessions.");
+                }
+                return Ok(());
+            }
+            "--help" | "-h" => {
+                println!("bz - Multi-agent coordination TUI");
+                println!();
+                println!("Usage: bz [OPTIONS] [COMMAND]");
+                println!();
+                println!("Commands:");
+                println!("  stop      Kill the session daemon");
+                println!("  sessions  List active sessions");
+                println!();
+                println!("Options:");
+                println!("  --takeover  Take over from existing client");
+                println!("  --help      Show this help");
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
+    let takeover = args.iter().any(|a| a == "--takeover");
+
     // Set up panic hook to restore terminal on panic
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen);
+        let _ = execute!(
+            io::stdout(),
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
         original_hook(panic);
     }));
 
     // Load configuration
     let config = Config::load()?;
 
-    // Set up terminal with mouse and bracketed paste support
+    // Connect to or spawn session
+    let opts = ConnectOptions { takeover };
+    let mut session = Session::connect_or_spawn(&config, opts).await?;
+
+    // Set up terminal
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Get terminal size (minus 1 row for status line)
+    // Get terminal size
     let size = terminal.size()?;
     let pty_height = size.height.saturating_sub(1);
 
-    // Create app from config
-    let mut app = App::from_config(&config, pty_height, size.width)?;
+    // Get session's write channel for PTY communication
+    let session_tx = session.write_tx();
+
+    // Create app from session
+    let mut app = App::from_session(&session, pty_height, size.width, session_tx);
 
     // Run the app
-    let result = run(&mut terminal, &mut app).await;
+    let result = run(&mut terminal, &mut app, &mut session).await;
 
-    // Restore terminal (always, even on error)
+    // Restore terminal
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
 
     result
 }
@@ -227,8 +323,9 @@ fn key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
     let bytes = match key.code {
         KeyCode::Char(c) => {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
-                // Ctrl+letter = ASCII 1-26
-                let ctrl = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a').wrapping_add(1);
+                let ctrl = (c.to_ascii_lowercase() as u8)
+                    .wrapping_sub(b'a')
+                    .wrapping_add(1);
                 vec![ctrl]
             } else {
                 let mut buf = [0u8; 4];
@@ -238,7 +335,6 @@ fn key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
         }
         KeyCode::Enter => {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
-                // Shift+Enter: CSI 13;2u (kitty keyboard protocol)
                 vec![27, b'[', b'1', b'3', b';', b'2', b'u']
             } else {
                 vec![b'\r']
@@ -247,7 +343,6 @@ fn key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Backspace => vec![127],
         KeyCode::Tab => {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
-                // Shift+Tab: CSI Z (back-tab)
                 vec![27, b'[', b'Z']
             } else {
                 vec![b'\t']
@@ -269,32 +364,112 @@ fn key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// Render quit confirmation modal
+fn render_quit_confirm(frame: &mut ratatui::Frame) {
+    let area = frame.area();
+
+    // Center the modal
+    let modal_width = 50;
+    let modal_height = 7;
+    let x = (area.width.saturating_sub(modal_width)) / 2;
+    let y = (area.height.saturating_sub(modal_height)) / 2;
+    let modal_area = Rect::new(x, y, modal_width, modal_height);
+
+    // Clear the modal area
+    frame.render_widget(Clear, modal_area);
+
+    // Render modal
+    let block = Block::default()
+        .title(" Quit Session ")
+        .borders(Borders::ALL)
+        .style(Style::default().bg(Color::Rgb(50, 50, 60)));
+
+    let text = Paragraph::new(
+        "This will kill all PTYs in this session.\n\n\
+         Press 'y' to confirm, any other key to cancel.",
+    )
+    .alignment(Alignment::Center)
+    .block(block);
+
+    frame.render_widget(text, modal_area);
+}
+
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
+    session: &mut Session,
 ) -> Result<()> {
     let mut event_stream = EventStream::new();
-    let mut render_interval = tokio::time::interval(Duration::from_millis(16)); // ~60fps
+    let mut render_interval = tokio::time::interval(Duration::from_millis(16));
 
     loop {
-        // Process output from all channels
-        app.process_all_output();
+        // Process any pending session messages
+        while let Some(msg) = session.try_recv() {
+            match msg {
+                DaemonMessage::History { pty_id, data } => {
+                    if let Some(channel) = app.get_channel_by_pty_id(pty_id) {
+                        channel.pty.process_history(&data);
+                    }
+                }
+                DaemonMessage::HistoryEnd { pty_id } => {
+                    if let Some(channel) = app.get_channel_by_pty_id(pty_id) {
+                        channel.pty.mark_history_complete();
+                    }
+                }
+                DaemonMessage::Output { pty_id, data } => {
+                    let is_focused = app
+                        .channels
+                        .get(app.focused)
+                        .map(|c| c.pty.id == pty_id)
+                        .unwrap_or(false);
+                    if let Some(channel) = app.get_channel_by_pty_id(pty_id) {
+                        channel.pty.process_daemon_output(&data, is_focused);
+                    }
+                }
+                DaemonMessage::PtyExited { pty_id, .. } => {
+                    if let Some(channel) = app.get_channel_by_pty_id(pty_id) {
+                        channel.pty.mark_exited();
+                    }
+                }
+                DaemonMessage::Kicked => {
+                    // Another client took over
+                    return Ok(());
+                }
+                DaemonMessage::Shutdown => {
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
 
         tokio::select! {
             // Handle terminal events
             Some(event_result) = event_stream.next() => {
                 match event_result? {
                     Event::Key(key) => {
+                        // Handle quit confirmation modal
+                        if app.quit_confirm {
+                            if key.code == KeyCode::Char('y') || key.code == KeyCode::Char('Y') {
+                                // Confirmed quit
+                                session.quit().await?;
+                                break;
+                            } else {
+                                // Cancel
+                                app.quit_confirm = false;
+                            }
+                            continue;
+                        }
+
                         match app.input_mode {
                             InputMode::Normal => {
-                                // Check if picker is open first
+                                // Check if picker is open
                                 if let Some(ref mut picker) = app.picker {
                                     match key.code {
                                         KeyCode::Esc => {
                                             app.picker = None;
                                         }
                                         KeyCode::Enter => {
-                                            if let Some(idx) = picker.selected_channel() {
+                                            if let Some(idx) = picker.selected_channel_from_channels(&app.channels) {
                                                 app.switch_to_channel(idx);
                                             }
                                             app.picker = None;
@@ -306,15 +481,15 @@ async fn run(
                                             picker.move_down();
                                         }
                                         KeyCode::Backspace => {
-                                            picker.pop_char(&app.channels);
+                                            picker.pop_char_from_channels(&app.channels);
                                         }
                                         KeyCode::Char(c) => {
-                                            picker.push_char(c, &app.channels);
+                                            picker.push_char_from_channels(c, &app.channels);
                                         }
                                         _ => {}
                                     }
                                 } else if app.focused_channel().pty.is_scrolled() {
-                                    // In scroll mode - handle scroll navigation
+                                    // In scroll mode
                                     let pty = &mut app.focused_channel().pty;
                                     match key.code {
                                         KeyCode::Esc | KeyCode::Char('q') => {
@@ -335,54 +510,44 @@ async fn run(
                                             pty.scroll_down(1);
                                         }
                                         KeyCode::Char('g') => {
-                                            // Go to top of scrollback
                                             let max = pty.scrollback_len();
                                             pty.scroll_up(max);
                                         }
                                         KeyCode::Char('G') => {
-                                            // Go to bottom
                                             pty.scroll_to_bottom();
                                         }
                                         _ => {}
                                     }
                                 } else if key.code == KeyCode::PageUp {
-                                    // PageUp enters scroll mode
                                     let page = app.focused_channel().pty.screen().size().0 as usize;
                                     app.focused_channel().pty.scroll_up(page.saturating_sub(2));
                                 } else if key.code == KeyCode::Char('b')
                                     && key.modifiers.contains(KeyModifiers::CONTROL)
                                 {
-                                    // Ctrl+B enters leader mode
                                     app.input_mode = InputMode::Leader;
                                 } else if key.code == KeyCode::Char('k')
                                     && key.modifiers.contains(KeyModifiers::CONTROL)
                                 {
-                                    // Ctrl+K opens channel picker directly
                                     let mut picker = Picker::new();
-                                    picker.update_filter(&app.channels);
+                                    picker.update_filter_from_channels(&app.channels);
                                     app.picker = Some(picker);
                                 } else if key.code == KeyCode::Char('\\')
                                     && key.modifiers.contains(KeyModifiers::CONTROL)
                                 {
-                                    // Ctrl+\ toggles sidebar
                                     app.show_sidebar = !app.show_sidebar;
-                                    // Resize PTYs to use new available width
                                     let (cols, rows) = crossterm::terminal::size()?;
                                     let pty_height = rows.saturating_sub(1);
-                                    app.resize_all(pty_height, cols)?;
+                                    app.resize_all(pty_height, cols);
                                 } else {
-                                    // All other keys go to PTY
                                     if let Some(bytes) = key_to_bytes(key) {
-                                        app.focused_channel().pty.write(&bytes)?;
+                                        app.focused_channel().pty.write(&bytes);
                                     }
                                 }
                             }
                             InputMode::Leader => {
-                                // Always return to normal after processing
                                 app.input_mode = InputMode::Normal;
 
                                 match key.code {
-                                    // Navigation
                                     KeyCode::Char('j') | KeyCode::Down => {
                                         app.next_channel();
                                     }
@@ -395,68 +560,49 @@ async fn run(
                                     KeyCode::Char('p') => {
                                         app.prev_channel();
                                     }
-
-                                    // Direct channel access (1-9)
                                     KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
                                         let idx = (c as usize) - ('1' as usize);
                                         app.switch_to_channel(idx);
                                     }
-
-                                    // Channel picker (search)
                                     KeyCode::Char('/') => {
                                         let mut picker = Picker::new();
-                                        picker.update_filter(&app.channels);
+                                        picker.update_filter_from_channels(&app.channels);
                                         app.picker = Some(picker);
                                     }
-
-                                    // Scroll mode
                                     KeyCode::Char('[') => {
-                                        // Enter scroll mode (like tmux copy-mode)
                                         let pty = &mut app.focused_channel().pty;
                                         let scrollback = pty.scrollback_len();
                                         if scrollback > 0 {
                                             pty.scroll_up(1);
                                         }
                                     }
-
-                                    // Restart PTY
-                                    KeyCode::Char('r') => {
-                                        let (cols, rows) = crossterm::terminal::size()?;
-                                        let pty_height = rows.saturating_sub(1);
-                                        app.restart_focused_pty(pty_height, cols)?;
-                                    }
-
-                                    // Quit
                                     KeyCode::Char('q') => {
+                                        // Detach (daemon stays alive)
+                                        session.detach().await?;
                                         break;
                                     }
-
-                                    // Send Ctrl+B to PTY (double-tap)
-                                    KeyCode::Char('b') => {
-                                        let bytes = vec![2]; // Ctrl+B = ASCII 2
-                                        app.focused_channel().pty.write(&bytes)?;
+                                    KeyCode::Char('Q') => {
+                                        // Show quit confirmation
+                                        app.quit_confirm = true;
+                                        app.input_mode = InputMode::Normal;
                                     }
-
-                                    // Cancel / unknown - just ignore
+                                    KeyCode::Char('b') => {
+                                        let bytes = vec![2];
+                                        app.focused_channel().pty.write(&bytes);
+                                    }
                                     KeyCode::Esc | _ => {}
                                 }
                             }
                         }
                     }
                     Event::Resize(cols, rows) => {
-                        // Auto-toggle sidebar based on width threshold
                         app.show_sidebar = cols >= MOBILE_WIDTH_THRESHOLD;
-
-                        // Resize PTYs (minus 1 for status line)
                         let pty_height = rows.saturating_sub(1);
-                        app.resize_all(pty_height, cols)?;
+                        app.resize_all(pty_height, cols);
                     }
                     Event::Mouse(mouse) => {
-                        // Handle mouse clicks in sidebar
                         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                            // Check if click is in sidebar area
                             if app.show_sidebar && mouse.column < SIDEBAR_WIDTH {
-                                // Row 0 is the title, channels start at row 1
                                 let channel_idx = mouse.row.saturating_sub(1) as usize;
                                 if channel_idx < app.channels.len() {
                                     app.switch_to_channel(channel_idx);
@@ -465,8 +611,7 @@ async fn run(
                         }
                     }
                     Event::Paste(text) => {
-                        // Write entire paste content at once (much faster than char-by-char)
-                        app.focused_channel().pty.write(text.as_bytes())?;
+                        app.focused_channel().pty.write(text.as_bytes());
                     }
                     _ => {}
                 }
@@ -474,13 +619,10 @@ async fn run(
 
             // Render at regular intervals
             _ = render_interval.tick() => {
-                // Check if any pending activities have settled
                 app.check_pending_activities();
 
                 terminal.draw(|frame| {
-                    // Determine main content area based on sidebar visibility
                     let main_area = if app.show_sidebar {
-                        // Horizontal split: sidebar | main content
                         let h_chunks = Layout::default()
                             .direction(Direction::Horizontal)
                             .constraints([
@@ -489,8 +631,7 @@ async fn run(
                             ])
                             .split(frame.area());
 
-                        // Render sidebar
-                        let sidebar = Sidebar::new(&app.channels, app.focused);
+                        let sidebar = Sidebar::from_session_channels(&app.channels, app.focused);
                         frame.render_widget(sidebar, h_chunks[0]);
 
                         h_chunks[1]
@@ -498,7 +639,6 @@ async fn run(
                         frame.area()
                     };
 
-                    // Vertical split for main content: PTY | status line
                     let v_chunks = Layout::default()
                         .direction(Direction::Vertical)
                         .constraints([
@@ -507,18 +647,15 @@ async fn run(
                         ])
                         .split(main_area);
 
-                    // PTY in main area (with scrollback support)
-                    // Check if PTY has exited
+                    // PTY content
                     let pty_status = app.focused_channel().pty.status.clone();
                     if pty_status == PtyStatus::Exited {
-                        // Show exit message over the terminal content
                         app.focused_channel().pty.apply_scroll_for_render();
                         let term_widget = TerminalWidget::new(app.focused_channel().pty.screen());
                         frame.render_widget(term_widget, v_chunks[0]);
                         app.focused_channel().pty.reset_scroll_view();
 
-                        // Overlay exit message
-                        let exit_msg = Paragraph::new("Process exited\n\nPress Ctrl+B r to restart")
+                        let exit_msg = Paragraph::new("Process exited")
                             .style(Style::default().fg(Color::Yellow))
                             .alignment(Alignment::Center);
                         frame.render_widget(exit_msg, v_chunks[0]);
@@ -529,23 +666,20 @@ async fn run(
                         app.focused_channel().pty.reset_scroll_view();
                     }
 
-                    // Status line with mode indicator
-                    // Extract pty state before borrowing app again
+                    // Status line
                     let is_scrolled = app.focused_channel().pty.is_scrolled();
                     let scroll_offset = app.focused_channel().pty.scroll_offset;
                     let scrollback_len = app.focused_channel().pty.scrollback_len();
 
                     let (status, status_style) = if pty_status == PtyStatus::Exited {
-                        // Exited status
                         (
-                            " EXITED │ ^B r restart │ ^K switch channel ".to_string(),
+                            " EXITED │ ^K switch channel ".to_string(),
                             Style::default()
                                 .bg(Color::Rgb(100, 50, 50))
                                 .fg(Color::White)
                                 .add_modifier(Modifier::BOLD),
                         )
                     } else if is_scrolled {
-                        // Scroll mode status
                         (
                             format!(" SCROLL [{}/{}] │ j/k line │ PgUp/PgDn page │ g/G top/bottom │ Esc/q exit ", scroll_offset, scrollback_len),
                             Style::default()
@@ -562,14 +696,14 @@ async fn run(
                                     String::new()
                                 };
                                 (
-                                    format!(" ^K search │ ^B leader{} ", scroll_hint),
+                                    format!(" ^K search │ ^B leader{} │ SESSION ", scroll_hint),
                                     Style::default()
                                         .bg(Color::Rgb(30, 30, 40))
                                         .fg(Color::DarkGray),
                                 )
                             }
                             InputMode::Leader => (
-                                " LEADER │ j/k nav │ 1-9 jump │ / search │ r restart │ q quit │ b send ^B ".to_string(),
+                                " LEADER │ j/k nav │ 1-9 jump │ / search │ q detach │ Q quit │ b send ^B ".to_string(),
                                 Style::default()
                                     .bg(Color::Rgb(180, 140, 40))
                                     .fg(Color::Black)
@@ -580,10 +714,15 @@ async fn run(
                     let status_widget = Paragraph::new(status).style(status_style);
                     frame.render_widget(status_widget, v_chunks[1]);
 
-                    // Render picker overlay if open
+                    // Picker overlay
                     if let Some(ref picker) = app.picker {
-                        let picker_widget = PickerWidget::new(picker, &app.channels);
+                        let picker_widget = PickerWidget::from_session_channels(picker, &app.channels);
                         frame.render_widget(picker_widget, frame.area());
+                    }
+
+                    // Quit confirmation overlay
+                    if app.quit_confirm {
+                        render_quit_confirm(frame);
                     }
                 })?;
             }
