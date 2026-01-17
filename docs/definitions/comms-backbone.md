@@ -178,24 +178,30 @@ Sidecar (Option B) is a reasonable fallback if embedding proves problematic, but
 
 2. **Web client** — Mobile access is via existing Matrix clients. We're not building a web UI.
 
-3. **Voice/video** — Matrix supports this; we don't need it for agent coordination.
+3. **Voice/video** — Matrix supports this; we don't need it for agent coordination. However, don't preclude it architecturally — DM voice could be valuable later.
 
 4. **Bridges to other platforms** — Slack, Discord, IRC bridges are possible via Matrix ecosystem but not our problem to solve.
 
 5. **Multi-user bz** — Single user, multiple agents. Not a team collaboration tool (yet).
 
+## Resolved Questions
+
+1. **E2EE handling** — Minimal effort for now. All agents are on the same box; external Matrix clients access via VPN or HTTPS. Don't over-engineer this until reality demands it.
+
+2. **Agent credential management** — bz is the parent process with a manifest of agents to spin up. Credentials are provisioned internally, not user-managed.
+
+3. **Conduit storage location** — `~/.local/share/bz/matrix/` is fine for now.
+
+4. **Room creation policy** — Matrix rooms are a superset of bz channels. Directory-backed "real" channels (1:1 with working directory) are auto-created from config. Lighter rooms (e.g., #alerts) can exist as chat-only, no workspace attached.
+
+5. **Presence semantics** — "Online" = working or able to answer questions (generally always, unless maintenance or quota exhaustion). Need to track "busy" (actively working) vs "idle" (available for new work) — whether via Matrix presence or custom state TBD.
+
+6. **History limits** — Infinite to start. Let reality force our hand on constraints.
+
+7. **Startup sequencing** — TUI rendering doesn't block on Conduit. If user navigates to a channel before Matrix is ready, show a loading state for the chat pane. (Or just block if that's less scope — pragmatism over purity.)
+
 ## Open Questions
 
-1. **E2EE handling** — Do we enable encryption by default? Adds complexity for agent message handling (Vodozemac). Probably yes for DMs, maybe not for rooms?
+1. **Busy/idle tracking mechanism** — Matrix has presence (online/offline/unavailable), but "busy working on task X" vs "idle awaiting work" might need custom state. Investigate Matrix presence extensions or room-based status updates.
 
-2. **Agent credential management** — How do agents authenticate to the homeserver? Auto-provisioned tokens? Need secure storage.
-
-3. **Conduit storage location** — `~/.local/share/bz/matrix/`? Size management for long-running instances?
-
-4. **Room creation policy** — Are rooms auto-created from bz.toml channels? What about ad-hoc rooms?
-
-5. **Presence semantics** — What does "agent is online" mean? Workspace active? Chaperone listening? Both?
-
-6. **History limits** — How much chat history to retain? Configurable per-room?
-
-7. **Startup sequencing** — Does Conduit need to be fully ready before bz TUI starts? Loading states?
+2. **#alerts and ephemeral rooms** — How are non-directory rooms created/managed? CLI command? Auto-created by agents? Config file?
