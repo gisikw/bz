@@ -12,12 +12,13 @@ jobs:
 
       - name: Scan for PII
         run: |
+          nix-shell -p curl age --run '
           # Fetch denylist from fort-nix (source of truth)
           PII_DENYLIST_URL="https://git.gisi.network/infra/fort-nix/raw/branch/main/clusters/bedlam/pii-denylist.age"
-          
+
           if curl -sf "$PII_DENYLIST_URL" -o /tmp/pii-denylist.age; then
             echo "$CI_AGE_KEY" > /tmp/ci-age-key.txt
-            trap 'rm -f /tmp/ci-age-key.txt /tmp/pii-denylist.age' EXIT
+            trap "rm -f /tmp/ci-age-key.txt /tmp/pii-denylist.age" EXIT
 
             age -d -i /tmp/ci-age-key.txt /tmp/pii-denylist.age > /tmp/pii-patterns.txt
 
@@ -40,13 +41,15 @@ jobs:
           else
             echo "::warning::Could not fetch PII denylist"
           fi
+          '
         env:
           CI_AGE_KEY: ${{ secrets.CI_AGE_KEY }}
 
       - name: Push to GitHub mirror
         run: |
+          nix-shell -p curl age --run '
           echo "$CI_AGE_KEY" > /tmp/ci-age-key.txt
-          trap 'rm -f /tmp/ci-age-key.txt' EXIT
+          trap "rm -f /tmp/ci-age-key.txt" EXIT
 
           # Fetch mirror token from fort-nix
           TOKEN_URL="https://git.gisi.network/infra/fort-nix/raw/branch/main/clusters/bedlam/github-mirror-token.age"
@@ -59,5 +62,6 @@ jobs:
           git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/gisikw/${REPO_NAME}.git" main:main
 
           echo "Mirror sync complete"
+          '
         env:
           CI_AGE_KEY: ${{ secrets.CI_AGE_KEY }}
