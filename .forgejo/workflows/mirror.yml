@@ -10,10 +10,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup tools
+        run: |
+          nix-env -iA nixpkgs.curl nixpkgs.age
+
       - name: Scan for PII
         run: |
-          export PATH="$(nix --extra-experimental-features 'nix-command flakes' build nixpkgs#curl nixpkgs#age --no-link --print-out-paths | tr '\n' ':')/bin:$PATH"
-
           # Fetch denylist from fort-nix (source of truth)
           PII_DENYLIST_URL="https://git.gisi.network/infra/fort-nix/raw/branch/main/clusters/bedlam/pii-denylist.age"
 
@@ -47,8 +49,6 @@ jobs:
 
       - name: Push to GitHub mirror
         run: |
-          export PATH="$(nix --extra-experimental-features 'nix-command flakes' build nixpkgs#curl nixpkgs#age --no-link --print-out-paths | tr '\n' ':')/bin:$PATH"
-
           echo "$CI_AGE_KEY" > /tmp/ci-age-key.txt
           trap 'rm -f /tmp/ci-age-key.txt' EXIT
 
