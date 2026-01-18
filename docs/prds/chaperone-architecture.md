@@ -1,6 +1,6 @@
 # Chaperone Architecture
 
-Decompose bz into three components: bzd (Matrix server), bz (Matrix TUI), and chaperone (persistent PTY + Matrix bot) — where chaperone is the atomic building block for both user workspaces and agent sessions.
+Decompose bz into three components: bzd (Matrix server), bz (Matrix TUI + PTY client), and chaperone (persistent PTY + Matrix bot) — where chaperone is the atomic building block for both user workspaces and agent sessions.
 
 **Status**: Draft
 
@@ -16,7 +16,7 @@ The original approach was monolithic: bzd manages PTYs, embeds Conduit, runs mat
 
 1. **Self-contained by default** — `bzd` must work out of the box. No external Matrix server required.
 
-2. **User workspaces need multiple PTYs** — A user in `#fort-nix` might have 3 terminals. Chaperones must support multiple PTYs (though agents typically use 1).
+2. **Chaperones support multiple PTYs** — User can have a PTY in `#fort-nix`, switch to `#wicket` and create a PTY there, without reaping the `#fort-nix` one. Persistence across channel switches, not simultaneous multiplexing. Agent chaperones are policy-limited to 1 PTY (chaperone-enforced, not architectural).
 
 3. **Agents are first-class Matrix participants** — Agents have identities (`@exo:localhost`), can be @mentioned, DM'd, invited to rooms.
 
@@ -24,7 +24,9 @@ The original approach was monolithic: bzd manages PTYs, embeds Conduit, runs mat
 
 5. **Crash isolation** — One chaperone dying shouldn't take down the system.
 
-6. **Persistence survives disconnection** — PTYs persist when bz disconnects. This is the chaperone's job, not bzd's.
+6. **Persistence survives disconnection** — Both the Matrix server (bzd/Conduit) and PTYs (chaperones) must persist when bz disconnects. Autonomous agents need their nervous system even with flaky wifi. This is critical for eventual autonomous operation.
+
+7. **User chaperone is mandatory** — bz requires a user chaperone to function. Without it, there's no Matrix identity for the human.
 
 ## Contracts
 
@@ -35,35 +37,55 @@ bzd embeds Conduit and exposes the Matrix client API on localhost.
 - Conduit storage: `~/.local/share/bz/matrix/`
 - Client API: `http://localhost:8448` (or configured)
 - bzd starts Conduit on boot, shuts down cleanly on exit
+- **bzd must stay running** even when bz disconnects — it's the nervous system
 
 ### bzd ↔ Chaperone
 
 bzd spawns and coordinates chaperones.
 
-**Spawn**: bzd reads a manifest of chaperones to start on boot (user workspaces, known agents). Each chaperone is a separate process.
+**Spawn**: bzd reads initial chaperones from `bz.toml` on first boot. Over time, chaperone membership becomes persistent state (via `/invite`, `/add`). User chaperone is always required.
 
-**PTY Attachment**: Chaperones notify bzd of PTY attachment changes:
-- `attach(pty_socket, room_id)` — "My PTY is now attached to this room"
-- `detach(pty_socket, room_id)` — "Remove my PTY from this room"
-- `move(pty_socket, from_room, to_room)` — "Move my PTY between rooms"
+**PTY Attachment**: Chaperones notify bzd of PTY attachment changes via control socket (not Matrix — too much latency/complexity for coordination):
 
-**Protocol**: TBD — could be Matrix messages to a control room, or a separate Unix socket, or room state events.
+```
+attach {
+  chaperone_id: string,    // e.g., "user" or "exo"
+  pty_id: string,          // internal to chaperone, e.g., "pty-0"
+  socket: path,            // e.g., ~/.local/share/bz/chaperones/user/pty-0.sock
+  room_id: string          // Matrix room ID
+}
+
+detach {
+  chaperone_id: string,
+  pty_id: string,
+  room_id: string
+}
+
+move {
+  chaperone_id: string,
+  pty_id: string,
+  from_room: string,
+  to_room: string
+}
+```
+
+**Lifecycle**: bzd tracks chaperone PIDs for potential reaping. On bzd shutdown, TRAP signals all chaperones to stand down gracefully.
 
 ### bzd ↔ bz
 
 bz connects to bzd as a Matrix client.
 
 - Standard Matrix client API for chat, rooms, presence
-- Room state includes `attached_ptys` metadata (list of socket paths)
+- Room state includes `attached_ptys` metadata (list of PTY descriptors)
 - bz reads `attached_ptys` to know which PTYs it can connect to for the focused room
 
 ### bz ↔ Chaperone PTY
 
-bz connects directly to chaperone PTY sockets for terminal rendering.
+bz connects directly to chaperone PTY sockets for terminal I/O (read AND write).
 
-- Socket path convention: `~/.local/share/bz/chaperones/<name>/pty-<n>.sock`
+- Socket path convention: `~/.local/share/bz/chaperones/<name>/<pty_id>.sock`
 - Protocol: Same as current bzd ↔ bz PTY protocol (output streaming, input, resize)
-- bz is just a viewer — chaperone owns the PTY lifecycle
+- Chaperone owns PTY lifecycle; bz is a read-write client
 
 ### Chaperone ↔ Matrix
 
@@ -73,14 +95,16 @@ Each chaperone is a Matrix client with its own identity.
 - Joins rooms, receives messages, sends messages
 - Manages own presence (online/busy/idle)
 - Can be @mentioned, DM'd, invited
+- Responds to DM commands: `/restart`, `/quit` (user-initiated lifecycle control)
 
 ### Room ↔ Channel Mapping
 
 A "channel" in bz is a Matrix room with optional metadata:
 
-- `directory`: Working directory path (for directory-backed channels)
-- `attached_ptys`: List of PTY sockets currently attached
-- Chat-only rooms (like `#alerts`) have no directory, no PTYs
+- `directory`: Working directory path (for directory-backed channels). Chat-only rooms get a tmpdir if a PTY is needed.
+- `attached_ptys`: List of PTY descriptors currently attached
+
+No special-casing of "chat-only" rooms — any room can have PTYs attached. Directory-backed rooms just have a persistent working directory; others get ephemeral tmpdirs on demand.
 
 ## Alternatives
 
@@ -101,7 +125,7 @@ bzd does everything: embeds Conduit, manages all PTYs, runs all Matrix clients, 
 
 ### Option B: Chaperone as Atomic Unit
 
-Factor out "persistent PTY + Matrix identity" as the chaperone process. bzd becomes Matrix infrastructure + coordination. bz becomes Matrix TUI + PTY viewer.
+Factor out "persistent PTY + Matrix identity" as the chaperone process. bzd becomes Matrix infrastructure + coordination. bz becomes Matrix TUI + PTY client.
 
 **Pros:**
 - Clean separation: each component has one job
@@ -137,7 +161,7 @@ Chaperone as a Rust library linked into bzd, but with isolated "virtual" chapero
 The insight that "persistent PTY + Matrix identity" is the fundamental unit is too valuable to ignore. Factoring it out:
 
 1. **Simplifies bzd** — It's a Matrix server with room metadata, not a god-object
-2. **Simplifies bz** — It's a Matrix TUI that can view PTYs, not a session manager
+2. **Simplifies bz** — It's a Matrix TUI that can connect to PTYs, not a session manager
 3. **Makes chaperone reusable** — Could run headless agents without bz/bzd
 4. **Unifies the model** — No special-casing user vs agent sessions
 
@@ -161,16 +185,32 @@ The multiple-Matrix-clients concern is mitigated because:
 
 5. **Distributed chaperones** — Chaperones on remote machines. Architecture allows it, not implementing now.
 
+6. **Sophisticated interrupt policies** — Agents could have interruptability scores ("John drops everything", "Pat finishes current task"). Rabbit hole. Deferring.
+
+## Resolved Questions
+
+1. **Chaperone ↔ bzd coordination protocol** — Separate Unix control socket, not Matrix messages. Matrix is elegant but too much latency/complexity for tight coordination.
+
+2. **Chaperone manifest format** — `bz.toml` for initial chaperones on first boot. Over time, chaperone set becomes persistent bzd state (via `/invite`, `/add`). User chaperone is mandatory and auto-created.
+
+3. **PTY socket permissions** — Same user. Sockets in `~/.local/share/bz/chaperones/<name>/`.
+
+4. **User workspace chaperone** — One chaperone with N PTYs. Agent chaperones are policy-limited to 1 PTY (enforced by chaperone, not architecture).
+
+5. **Agent interrupt protocol** — Simple default: instant suspend on @mention/DM, resume work after 1 minute of conversation idle. Sophisticated policies deferred.
+
+6. **Chaperone lifecycle** — Chaperones are permanent. They exist and are DM-able even when idle, even without a "home" room. They exit when:
+   - Removed from the Matrix server (deregistered)
+   - User DMs `/quit` to the chaperone
+   - bzd shuts down (TRAP signals all chaperones to stand down)
+   - User DMs `/restart` causes graceful restart
+
+7. **Room tmpdir cleanup** — On room delete. bzd spawns tmpdirs for chat-only rooms, deletes them when room is deleted, cleans up in TRAP on shutdown. Keep it simple.
+
+8. **PTY-to-room attachment UX** — Keybind in bz: `Ctrl+B t` (modal editing scheme). Future UX enhancements can add other triggers if needed.
+
+9. **Chaperone config format** — Filepath only: `bzc --config=./path/to/chaperone.toml`. Decouples chaperone definition from bzd — they can evolve independently. Flow: user invokes `bz` → `bz` attaches to or spawns `bzd` → `bzd` spawns `bzc --config=<path>` for each chaperone.
+
 ## Open Questions
 
-1. **Chaperone ↔ bzd coordination protocol** — Matrix messages? Room state events? Separate control socket? Need to design this interface.
-
-2. **Chaperone manifest format** — Where does bzd learn which chaperones to spawn? `bz.toml`? Separate file? Room membership?
-
-3. **PTY socket permissions** — How does bz get permission to connect to chaperone-owned sockets? Same user? Socket in shared directory?
-
-4. **User workspace chaperone** — Is it one chaperone with N PTYs, or N chaperones with 1 PTY each? Leaning toward one chaperone (matches "user as a Matrix identity").
-
-5. **Agent interrupt protocol** — How does a chaperone interrupt its subprocess (e.g., Claude Code) when @mentioned? This is the chaperone's internal concern but needs design.
-
-6. **Chaperone lifecycle** — When does a chaperone exit? When its PTYs all exit? When explicitly killed? When the room is deleted?
+None currently — ready for implementation planning.
