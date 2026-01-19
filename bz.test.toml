@@ -1,0 +1,30 @@
+# Test configuration for bz
+# Usage: ./bin/bz --config=./bz.test.toml
+
+[matrix]
+server_name = "bz.gisi.network"
+
+[[channel]]
+name = "exocortex"
+cwd = "/home/dev/Projects/exocortex"
+command = "tmux new-session -A -s bz-exocortex"
+
+[[channel]]
+name = "fort-nix"
+cwd = "/home/dev/Projects/fort-nix"
+command = "tmux new-session -A -s bz-fort-nix"
+
+[[channel]]
+name = "wicket"
+cwd = "/home/dev/Projects/wicket"
+command = "tmux new-session -A -s bz-wicket"
+
+[[channel]]
+name = "dwim"
+cwd = "/home/dev/Projects/dwim"
+command = "tmux new-session -A -s bz-dwim"
+
+[[channel]]
+name = "bz"
+cwd = "/home/dev/Projects/bz"
+command = "tmux new-session -A -s bz-bz"

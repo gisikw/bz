@@ -223,3 +223,18 @@ impl ManagedPty {
         self.history.iter().copied().collect()
     }
 }
+
+impl Drop for ManagedPty {
+    fn drop(&mut self) {
+        // WORKAROUND: The portable_pty writer's destructor sends a phantom newline
+        // to the PTY slave. To prevent this, we forget the writer wrapper.
+        //
+        // This "leaks" the file descriptor, but since this only happens during
+        // bzc shutdown, the OS immediately cleans it up when the process exits.
+        // We can't easily close the fd ourselves because the writer is a trait
+        // object (Box<dyn Write + Send>) which doesn't expose AsRawFd.
+        let dummy: Box<dyn Write + Send> = Box::new(std::io::sink());
+        let old_writer = std::mem::replace(&mut self.writer, dummy);
+        std::mem::forget(old_writer);
+    }
+}
