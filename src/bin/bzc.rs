@@ -116,18 +116,79 @@ fn main() -> Result<()> {
                         // Start sync loop
                         let mut message_rx = client.start_sync();
 
+                        // Track if we should quit
+                        let mut should_quit = false;
+
                         // Main loop - handle messages and signals
                         loop {
                             tokio::select! {
                                 Some(msg) = message_rx.recv() => {
-                                    // Log received messages for now
+                                    let sender_name = msg.sender_display_name.clone()
+                                        .unwrap_or_else(|| msg.sender.clone());
+
                                     eprintln!("bzc [{}]: message in {}: <{}> {}",
                                         agent_name,
                                         msg.room_id,
-                                        msg.sender_display_name.unwrap_or(msg.sender),
+                                        sender_name,
                                         msg.content
                                     );
-                                    // TODO: Route to agent logic
+
+                                    // Parse commands (messages starting with /)
+                                    let content = msg.content.trim();
+                                    if content.starts_with('/') {
+                                        let parts: Vec<&str> = content.splitn(2, ' ').collect();
+                                        let command = parts[0];
+                                        let _args = parts.get(1).unwrap_or(&"");
+
+                                        match command {
+                                            "/quit" => {
+                                                eprintln!("bzc [{}]: received /quit command", agent_name);
+                                                // Send confirmation
+                                                if let Err(e) = client.send_message(&msg.room_id, "Shutting down...").await {
+                                                    eprintln!("bzc [{}]: failed to send quit message: {}", agent_name, e);
+                                                }
+                                                should_quit = true;
+                                                break;
+                                            }
+                                            "/restart" => {
+                                                eprintln!("bzc [{}]: received /restart command", agent_name);
+                                                // Send confirmation - actual restart handled by bzd
+                                                if let Err(e) = client.send_message(&msg.room_id, "Restart requested (not yet implemented)").await {
+                                                    eprintln!("bzc [{}]: failed to send restart message: {}", agent_name, e);
+                                                }
+                                            }
+                                            "/help" => {
+                                                let help_msg = "Available commands:\n- /quit - Shut down this agent\n- /restart - Restart this agent\n- /help - Show this message";
+                                                if let Err(e) = client.send_message(&msg.room_id, help_msg).await {
+                                                    eprintln!("bzc [{}]: failed to send help message: {}", agent_name, e);
+                                                }
+                                            }
+                                            _ => {
+                                                // Unknown command - ignore or echo help
+                                                eprintln!("bzc [{}]: unknown command: {}", agent_name, command);
+                                            }
+                                        }
+                                    } else {
+                                        // Check for @mentions
+                                        // Match @agentname or @agentname:server patterns
+                                        let mention_simple = format!("@{}", agent_name);
+                                        let mention_full = format!("@{}:", agent_name);
+
+                                        let is_mentioned = content.contains(&mention_simple)
+                                            || content.to_lowercase().contains(&mention_simple.to_lowercase());
+
+                                        if is_mentioned {
+                                            eprintln!("bzc [{}]: @mentioned in {}: {}",
+                                                agent_name, msg.room_id, content);
+
+                                            // Trigger interrupt - acknowledge the mention
+                                            // Future: This is where we'd signal the PTY to interrupt
+                                            let ack = format!("👋 You mentioned me! (interrupt received)");
+                                            if let Err(e) = client.send_message(&msg.room_id, &ack).await {
+                                                eprintln!("bzc [{}]: failed to send mention ack: {}", agent_name, e);
+                                            }
+                                        }
+                                    }
                                 }
                                 _ = sigterm.recv() => {
                                     eprintln!("bzc: received SIGTERM, shutting down");
@@ -138,6 +199,10 @@ fn main() -> Result<()> {
                                     break;
                                 }
                             }
+                        }
+
+                        if should_quit {
+                            eprintln!("bzc [{}]: exiting due to /quit command", agent_name);
                         }
                     }
                     Err(e) => {
