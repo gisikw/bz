@@ -182,9 +182,7 @@ fn find_bzc_binary() -> Result<PathBuf> {
 
 /// Control socket path for the user chaperone
 fn control_socket_path() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("bz/chaperones/user/control.sock")
+    crate::env::data_dir().join("chaperones/user/control.sock")
 }
 
 /// Read a control message from a stream

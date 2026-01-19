@@ -9,246 +9,25 @@
 //!
 //! ## Commands
 //!
-//! - `spawn` - Start bz (uses BZ_SESSION_DIR, BZ_DATA_DIR, BZ_CONDUIT_PORT for isolation)
+//! - `spawn [rows] [cols]` - Start bz (default: 24x80)
 //! - `send <text>` - Send text (supports \x02 for Ctrl+B, \n for newline, etc.)
 //! - `screen` - Dump current screen contents
-//! - `cursor` - Show cursor position
+//! - `cursor` - Show screen with cursor position
 //! - `resize <rows> <cols>` - Resize the PTY
-//! - `wait <ms>` - Wait for specified milliseconds
-//! - `quit` - Clean shutdown
+//! - `wait <ms>` - Wait and collect output
+//! - `status` - Check if bz is still running
+//! - `quit` - Exit driver
 //!
-//! ## Escape Sequences
+//! ## Environment Variables
 //!
-//! In `send` command:
-//! - `\n` - newline (0x0a)
-//! - `\r` - carriage return (0x0d)
-//! - `\t` - tab (0x09)
-//! - `\x##` - hex byte (e.g., `\x02` for Ctrl+B)
-//! - `\\` - literal backslash
+//! For test isolation:
+//! - `BZ_SESSION_DIR` - Session socket directory
+//! - `BZ_DATA_DIR` - Data directory
+//! - `BZ_CONDUIT_PORT` - Matrix server port
 
-use std::io::{self, BufRead, Read, Write};
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
+use std::io::{self, BufRead};
 
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-
-struct PtyDriver {
-    parser: vt100::Parser,
-    writer: Box<dyn Write + Send>,
-    _reader_thread: thread::JoinHandle<()>,
-    output_rx: mpsc::Receiver<Vec<u8>>,
-    master: Box<dyn portable_pty::MasterPty + Send>,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
-    rows: u16,
-    cols: u16,
-}
-
-impl PtyDriver {
-    fn spawn(rows: u16, cols: u16) -> io::Result<Self> {
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-        // Build command for bz
-        let mut cmd = CommandBuilder::new(find_bz_binary());
-        cmd.env("TERM", "xterm-256color");
-
-        // Add target/debug to PATH so bz can find bzd
-        let path = format!(
-            "{}:{}",
-            binary_dir(),
-            std::env::var("PATH").unwrap_or_default()
-        );
-        cmd.env("PATH", path);
-
-        // Pass through isolation env vars if set
-        if let Ok(v) = std::env::var("BZ_SESSION_DIR") {
-            cmd.env("BZ_SESSION_DIR", v);
-        }
-        if let Ok(v) = std::env::var("BZ_DATA_DIR") {
-            cmd.env("BZ_DATA_DIR", v);
-        }
-        if let Ok(v) = std::env::var("BZ_CONDUIT_PORT") {
-            cmd.env("BZ_CONDUIT_PORT", v);
-        }
-
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-        let mut reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-        // Spawn reader thread
-        let (tx, rx) = mpsc::channel();
-        let reader_thread = thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if tx.send(buf[..n].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        Ok(Self {
-            parser: vt100::Parser::new(rows, cols, 0),
-            writer,
-            _reader_thread: reader_thread,
-            output_rx: rx,
-            master: pair.master,
-            child,
-            rows,
-            cols,
-        })
-    }
-
-    fn process_pending_output(&mut self) {
-        // Drain all pending output
-        while let Ok(data) = self.output_rx.try_recv() {
-            self.parser.process(&data);
-        }
-    }
-
-    fn wait_and_process(&mut self, ms: u64) {
-        let deadline = std::time::Instant::now() + Duration::from_millis(ms);
-        while std::time::Instant::now() < deadline {
-            match self.output_rx.recv_timeout(Duration::from_millis(10)) {
-                Ok(data) => self.parser.process(&data),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-    }
-
-    fn send(&mut self, text: &str) -> io::Result<()> {
-        let bytes = parse_escape_sequences(text);
-        self.writer.write_all(&bytes)?;
-        self.writer.flush()?;
-        Ok(())
-    }
-
-    fn screen(&mut self) -> String {
-        self.process_pending_output();
-        self.parser.screen().contents()
-    }
-
-    fn screen_with_cursor(&mut self) -> String {
-        self.process_pending_output();
-        let screen = self.parser.screen();
-        let (cursor_row, cursor_col) = screen.cursor_position();
-        let contents = screen.contents();
-        format!(
-            "{}\n--- cursor: row={}, col={} ---",
-            contents, cursor_row, cursor_col
-        )
-    }
-
-    fn resize(&mut self, rows: u16, cols: u16) -> io::Result<()> {
-        self.master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-        // vt100::Parser doesn't support resize, so create a new one
-        // This loses scroll history but that's acceptable for testing
-        self.parser = vt100::Parser::new(rows, cols, 0);
-        self.rows = rows;
-        self.cols = cols;
-        Ok(())
-    }
-
-    fn is_running(&mut self) -> bool {
-        match self.child.try_wait() {
-            Ok(None) => true,
-            _ => false,
-        }
-    }
-}
-
-fn find_bz_binary() -> String {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    // Check debug first, then release
-    let debug_path = format!("{}/target/debug/bz", manifest_dir);
-    if std::path::Path::new(&debug_path).exists() {
-        return debug_path;
-    }
-    let release_path = format!("{}/target/release/bz", manifest_dir);
-    if std::path::Path::new(&release_path).exists() {
-        return release_path;
-    }
-    // Fall back to PATH
-    "bz".to_string()
-}
-
-fn binary_dir() -> String {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    format!("{}/target/debug", manifest_dir)
-}
-
-fn parse_escape_sequences(s: &str) -> Vec<u8> {
-    let mut result = Vec::new();
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('n') => result.push(0x0a),
-                Some('r') => result.push(0x0d),
-                Some('t') => result.push(0x09),
-                Some('\\') => result.push(b'\\'),
-                Some('x') => {
-                    // Parse \x## hex escape
-                    let mut hex = String::new();
-                    if let Some(&c1) = chars.peek() {
-                        if c1.is_ascii_hexdigit() {
-                            hex.push(chars.next().unwrap());
-                        }
-                    }
-                    if let Some(&c2) = chars.peek() {
-                        if c2.is_ascii_hexdigit() {
-                            hex.push(chars.next().unwrap());
-                        }
-                    }
-                    if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                        result.push(byte);
-                    }
-                }
-                Some(other) => {
-                    result.push(b'\\');
-                    result.extend(other.to_string().as_bytes());
-                }
-                None => result.push(b'\\'),
-            }
-        } else {
-            result.extend(c.to_string().as_bytes());
-        }
-    }
-
-    result
-}
+use bz::test_support::{parse_escape_sequences, PtyDriver};
 
 fn print_help() {
     println!("bz-pty-driver - Interactive PTY driver for testing bz");
@@ -290,8 +69,8 @@ fn main() {
         };
 
         let parts: Vec<&str> = line.trim().splitn(2, ' ').collect();
-        let cmd = parts.first().map(|s| *s).unwrap_or("");
-        let arg = parts.get(1).map(|s| *s).unwrap_or("");
+        let cmd = parts.first().copied().unwrap_or("");
+        let arg = parts.get(1).copied().unwrap_or("");
 
         match cmd {
             "help" | "?" => print_help(),
@@ -398,25 +177,5 @@ fn main() {
 
             _ => println!("ERROR: unknown command '{}'. Type 'help' for commands.", cmd),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_escape_sequences() {
-        assert_eq!(parse_escape_sequences("hello"), b"hello");
-        assert_eq!(parse_escape_sequences(r"\n"), vec![0x0a]);
-        assert_eq!(parse_escape_sequences(r"\r"), vec![0x0d]);
-        assert_eq!(parse_escape_sequences(r"\t"), vec![0x09]);
-        assert_eq!(parse_escape_sequences(r"\\"), vec![b'\\']);
-        assert_eq!(parse_escape_sequences(r"\x02"), vec![0x02]);
-        assert_eq!(parse_escape_sequences(r"\x02n"), vec![0x02, b'n']);
-        assert_eq!(
-            parse_escape_sequences(r"hello\nworld"),
-            b"hello\nworld".to_vec()
-        );
     }
 }

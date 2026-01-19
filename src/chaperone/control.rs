@@ -17,9 +17,7 @@ use super::pty_socket::{PtyInput, PtySocket};
 
 /// Base directory for chaperone data
 fn chaperone_base_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("bz/chaperones")
+    crate::env::data_dir().join("chaperones")
 }
 
 /// Directory for a specific chaperone

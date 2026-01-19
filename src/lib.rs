@@ -21,4 +21,5 @@ pub mod session;
 pub mod session_pty;
 pub mod sidebar;
 pub mod terminal;
+pub mod test_support;
 pub mod user_chaperone;
