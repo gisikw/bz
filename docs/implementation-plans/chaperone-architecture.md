@@ -26,50 +26,50 @@ The current architecture conflates concerns: bzd manages PTYs directly and bz co
 | bz connects to bzd for PTY I/O | bz connects directly to chaperone PTY sockets |
 | Channels are local PTY containers | Channels are Matrix rooms with attached PTYs |
 | No communication layer | Matrix (Conduit) as backbone |
-| No agent identities | Chaperones have Matrix identities |
+| No agent identities | Agent chaperones have Matrix identities |
 
 ### What Gets Reused
 
 - **PTY spawning/buffering**: `ManagedPty`, output ring buffers → moves into chaperone
 - **Terminal emulation**: `vt100` parser, scrollback → stays in bz
 - **TUI framework**: sidebar, terminal widget, input handling → adapts for Matrix
-- **IPC pattern**: Length-prefixed bincode → used for bzd ↔ chaperone coordination
+- **IPC pattern**: Length-prefixed bincode → used for chaperone coordination
 - **Config loading**: TOML parsing → extended for agents/rooms
 
 ## What Needs to Change
 
-1. **New binary: bzc** — Chaperone process with Matrix identity + PTY management
-2. **bzd transformation** — Embed Conduit, spawn/coordinate chaperones, expose room metadata
-3. **bz transformation** — Become Matrix client, connect to chaperone PTYs for terminal I/O
-4. **New protocol** — Chaperone ↔ bzd coordination (attach/detach/move notifications)
+1. **New binary: bzc** — Chaperone process for PTY management (user) or Matrix identity + PTY (agents)
+2. **bzd transformation** — Manage Conduit sidecar, coordinate chaperones, track room metadata
+3. **bz transformation** — Become Matrix client, spawn user chaperone, connect to PTY sockets
+4. **New protocol** — Chaperone ↔ bzd coordination (attach/detach notifications)
 5. **Config extension** — Agent definitions, room mappings, Conduit settings
 
 ## Architectural Decisions
 
-### AD-1: Conduit Embedding Strategy
+### AD-1: Conduit as Managed Sidecar
 
-**Context**: Conduit can be embedded as a Rust library or run as a subprocess.
+**Context**: Conduit could be embedded as a library or run as a subprocess.
 
-**Decision**: Embed Conduit directly in bzd using `conduit` as a library dependency.
+**Decision**: Run Conduit as a managed sidecar process, spawned and supervised by bzd.
 
 **Rationale**:
-- Single daemon, single lifecycle — matches PRD constraint
-- No subprocess coordination or orphan processes
-- Conduit is designed for lightweight/embedded use
-- Shared async runtime (tokio), direct function calls
-- If embedding proves problematic, sidecar is fallback
+- `matrix-conduit` on crates.io appears designed as a standalone binary, not a library
+- Sidecar still achieves "single command starts everything" UX
+- bzd spawns Conduit on start, monitors health, shuts down on exit
+- Clean process boundaries; Conduit crash doesn't take down bzd
+- If library embedding becomes viable later, can revisit
 
 ### AD-2: Chaperone Process Model
 
 **Context**: Chaperones could be threads, actors, or processes.
 
-**Decision**: Chaperones are separate OS processes (`bzc`) spawned by bzd.
+**Decision**: Chaperones are separate OS processes (`bzc`) with two modes: PTY-only (user) or Matrix+PTY (agents).
 
 **Rationale**:
 - Crash isolation — one chaperone dying doesn't affect others
-- Independent Matrix clients — each has its own identity and sync state
+- User chaperone needs no Matrix identity — bz is the human's Matrix client
+- Agent chaperones are Matrix bots with their own identities
 - Testable in isolation — can run `bzc` standalone
-- Matches the PRD's "atomic building block" principle
 - Process overhead is minimal for long-lived services
 
 ### AD-3: PTY Socket Protocol
@@ -88,249 +88,263 @@ The current architecture conflates concerns: bzd manages PTYs directly and bz co
 
 **Context**: How do chaperones notify bzd of PTY state changes?
 
-**Decision**: Dedicated control socket per chaperone at `~/.local/share/bz/chaperones/<name>/control.sock`.
+**Decision**: Dedicated control socket per chaperone at `~/.local/share/bz/chaperones/<name>/control.sock`. Protocol supports `attach` and `detach` events only — no `move` (use detach+attach).
 
 **Rationale**:
 - Not Matrix (too much latency for coordination as noted in PRD)
 - Separate from PTY sockets (different concerns)
 - Same bincode framing for consistency
-- bzd listens; chaperones connect and send attach/detach/move events
+- No `move` command — detach+attach is sufficient and reduces test surface
+- bzd listens; chaperones connect and send events
 
-### AD-5: Matrix Client Distribution
+### AD-5: bz as Human's Matrix Client
 
-**Context**: How many matrix-sdk clients run in the system?
+**Context**: How does the human interact with Matrix?
 
-**Decision**: One client per process — bzd has one, each chaperone has one, bz has one.
-
-**Rationale**:
-- Each process needs its own Matrix identity (user, agent, user-again)
-- matrix-sdk is designed for one-client-per-process
-- Local Conduit means low latency between clients
-- Simpler than trying to share client state across processes
-
-### AD-6: User Chaperone Bootstrap
-
-**Context**: User needs a chaperone to have a Matrix identity, but bzd needs to start first.
-
-**Decision**: bzd auto-spawns user chaperone on first start before accepting bz connections.
+**Decision**: bz itself is the Matrix client for the human. The user chaperone is PTY-only (no Matrix identity).
 
 **Rationale**:
-- User chaperone is mandatory per PRD
-- bzd knows user identity from config
-- User chaperone registers with Conduit, then signals ready
-- bz can then connect (to Conduit as Matrix client, to user chaperone for PTYs)
+- Avoids duplicate Matrix connections for the same human
+- User chaperone becomes simpler — just PTY management via bincode
+- bz already needs matrix-sdk for room list, chat — let it own the identity
+- Cleaner separation: chaperones manage PTYs, bz manages Matrix UI
+- bzd doesn't need matrix-sdk at all — just Conduit sidecar management
+
+### AD-6: bz Spawns User Chaperone
+
+**Context**: Who spawns the user's chaperone?
+
+**Decision**: bz spawns its own user chaperone with `bzc --config=<path> --homeserver=<url>`.
+
+**Rationale**:
+- Decouples bzd from single-user assumptions
+- bz knows its user identity and homeserver URL
+- Better positioned for future multi-user support
+- bzd becomes purely infrastructure (Conduit + agent chaperones)
+- User chaperone lifecycle tied to bz session
+
+### AD-7: Screen Navigation Model
+
+**Context**: How does the user navigate between chat and PTYs within a room?
+
+**Decision**: Rooms have "screens" — screen 1 is always Matrix chat, screens 2..n are attached PTYs. Navigate with h/l (horizontal), rooms with j/k (vertical). bz attaches to one PTY at a time.
+
+**Rationale**:
+- Consistent with existing j/k channel navigation
+- h/l is intuitive for horizontal screen switching
+- One PTY attachment at a time reduces complexity and resource usage
+- Chat is always screen 1 — predictable, always accessible
+- PTY screens ordered by attachment time
 
 ## Implementation Phases
 
-### Phase 1: Conduit Embedding
+### Phase 1: Conduit Sidecar
 
-Get Conduit running inside bzd without changing existing functionality.
+Get Conduit running as a managed subprocess of bzd.
 
-- [ ] Add `conduit` as Cargo dependency (evaluate git vs crates.io)
-- [ ] Create `src/daemon/conduit.rs` — Conduit lifecycle wrapper
+- [ ] Download/install Conduit binary (or expect it on PATH)
+- [ ] Create `src/daemon/conduit.rs` — process spawning, health monitoring
+- [ ] Generate Conduit config at `~/.local/share/bz/conduit.toml`
 - [ ] Initialize Conduit database at `~/.local/share/bz/matrix/`
-- [ ] Configure Conduit: localhost binding, server name, storage path
-- [ ] Integrate Conduit startup into bzd boot sequence
-- [ ] Graceful shutdown — Conduit stops cleanly when bzd exits
+- [ ] Spawn Conduit on bzd start, bind to localhost:8448
+- [ ] Health check loop (process alive, API responding)
+- [ ] Graceful shutdown — SIGTERM to Conduit when bzd exits
 - [ ] Existing PTY functionality unchanged (regression test)
 
 **Acceptance criteria**:
 - `curl http://localhost:8448/_matrix/client/versions` returns valid JSON after bzd starts
 - Element can connect to `http://localhost:8448` and see the server
 - Existing `bz` attach/detach/PTY functionality still works
-- Stopping bzd cleanly shuts down Conduit (no orphan processes, no corrupt DB)
+- Stopping bzd cleanly stops Conduit (no orphan processes)
+- Conduit crash triggers bzd health check failure (logged, potentially restart)
 
 **Depends on**: Nothing
 **Enables**: Phase 2
 
-### Phase 2: User Matrix Identity
+### Phase 2: Chaperone Skeleton (PTY-only mode)
 
-Human user gets a Matrix account and can send/receive messages.
-
-- [ ] Add `matrix-sdk` as Cargo dependency
-- [ ] Auto-register user on first run (`@<username>:localhost`)
-- [ ] Store credentials at `~/.local/share/bz/matrix/user.json`
-- [ ] Create Matrix client in bzd with sync loop
-- [ ] Log received messages to bzd stdout (verification)
-- [ ] Send test message on startup (verification)
-
-**Acceptance criteria**:
-- First run creates `@<username>:localhost` account automatically
-- Sending a message in Element to that user appears in bzd logs
-- bzd can send a message that appears in Element
-- Credentials persist — restart doesn't re-register
-- Sync state survives restart (messages don't disappear)
-
-**Depends on**: Phase 1
-**Enables**: Phase 3
-
-### Phase 3: Chaperone Skeleton
-
-Create the chaperone binary with basic Matrix identity (no PTY yet).
+Create the chaperone binary with PTY management, no Matrix.
 
 - [ ] New binary: `src/bin/bzc.rs`
-- [ ] Config format: `--config=<path>` pointing to TOML with name, credentials path
-- [ ] Matrix client setup — login as `@<name>:localhost`
+- [ ] CLI: `bzc --config=<path>` with TOML containing name, mode (pty-only vs matrix)
 - [ ] Control socket listener at `~/.local/share/bz/chaperones/<name>/control.sock`
-- [ ] Heartbeat/ready signal to bzd over control socket
+- [ ] Ready signal over control socket
 - [ ] Graceful shutdown on SIGTERM
+- [ ] Port `ManagedPty` and output buffering from `daemon/pty_manager.rs`
+- [ ] PTY socket creation at `~/.local/share/bz/chaperones/<name>/<pty_id>.sock`
+- [ ] PTY protocol handler (reuse `protocol.rs` message types)
+- [ ] Attach/detach notifications over control socket
 
 **Acceptance criteria**:
-- `bzc --config=./test-chaperone.toml` starts and logs in as configured identity
-- Chaperone appears in Element user list
-- Can send DM to chaperone, chaperone logs receipt
-- bzd can connect to control socket and receive ready signal
-- SIGTERM causes clean exit
+- `bzc --config=./user-chaperone.toml` starts in PTY-only mode
+- Spawning a PTY creates socket, direct connection shows terminal output
+- Input/resize commands work over PTY socket
+- Attach/detach events sent over control socket
+- SIGTERM causes clean exit (PTYs terminated)
+
+**Depends on**: Nothing (parallel with Phase 1)
+**Enables**: Phase 3
+
+### Phase 3: bz Spawns User Chaperone
+
+bz spawns and manages its own user chaperone.
+
+- [ ] User chaperone config generation (tmpfile or inline)
+- [ ] Spawn `bzc` on bz start with appropriate config
+- [ ] Connect to user chaperone control socket
+- [ ] Wait for ready signal before proceeding
+- [ ] PTY socket connection based on control socket events
+- [ ] Propagate SIGTERM to user chaperone on bz exit
+- [ ] Remove legacy bzd PTY connection code
+
+**Acceptance criteria**:
+- `bz` starts and spawns `bzc` automatically
+- `ps aux | grep bzc` shows user chaperone process
+- Terminal I/O works through chaperone PTY socket
+- Exiting bz terminates user chaperone
+- Crash of bz (kill -9) leaves chaperone orphaned (acceptable for now)
 
 **Depends on**: Phase 2
 **Enables**: Phase 4
 
-### Phase 4: Chaperone PTY Management
+### Phase 4: bz Matrix Client
 
-Move PTY ownership from bzd into chaperone.
+bz becomes a Matrix client for the human.
 
-- [ ] Port `ManagedPty` and output buffering from `daemon/pty_manager.rs` to chaperone
-- [ ] PTY socket creation at `~/.local/share/bz/chaperones/<name>/<pty_id>.sock`
-- [ ] PTY protocol handler (reuse `protocol.rs` message types)
-- [ ] Attach/detach notifications to bzd over control socket
-- [ ] Multi-PTY support (user chaperone can have N PTYs)
-- [ ] Policy enforcement: agent chaperones limited to 1 PTY
-
-**Acceptance criteria**:
-- Chaperone spawns PTY on command
-- Direct socket connection to PTY socket shows terminal output
-- Input/resize commands work over PTY socket
-- Attach/detach events arrive at bzd control socket
-- User chaperone can manage multiple PTYs
-- Agent chaperone rejects second PTY spawn
-
-**Depends on**: Phase 3
-**Enables**: Phase 5, Phase 6
-
-### Phase 5: bzd Chaperone Orchestration
-
-bzd spawns and manages chaperone lifecycle.
-
-- [ ] Read chaperone definitions from `bz.toml`
-- [ ] Spawn user chaperone on bzd start (mandatory)
-- [ ] Spawn agent chaperones from config
-- [ ] Track chaperone PIDs and control socket connections
-- [ ] Aggregate PTY attachment state from chaperone notifications
-- [ ] SIGTERM propagation to all chaperones on bzd shutdown
-- [ ] Remove direct PTY management from bzd (now in chaperones)
+- [ ] Add `matrix-sdk` to bz
+- [ ] User registration on first run (`@<username>:localhost`)
+- [ ] Credential storage at `~/.local/share/bz/matrix/user.json`
+- [ ] Password set during registration (for mobile access)
+- [ ] Matrix sync loop in bz
+- [ ] Fetch room list, display in sidebar
+- [ ] Room state includes `attached_ptys` metadata
 
 **Acceptance criteria**:
-- `bz.toml` with `[[chaperone]]` sections spawns corresponding `bzc` processes
-- User chaperone starts before bzd accepts bz connections
-- `ps aux | grep bzc` shows expected chaperone processes
-- bzd tracks which PTYs are attached to which rooms
-- Stopping bzd sends SIGTERM to all chaperones (they exit cleanly)
-
-**Depends on**: Phase 4
-**Enables**: Phase 7
-
-### Phase 6: Room Management
-
-Channels become Matrix rooms with PTY attachment metadata.
-
-- [ ] Auto-create room for each channel in config on first run
-- [ ] Room ↔ channel ID mapping in bzd state
-- [ ] Room state event for `attached_ptys` list
-- [ ] User auto-joins channel rooms
-- [ ] Chat-only room support (no backing directory)
-- [ ] tmpdir creation for chat-only rooms needing a PTY
-- [ ] tmpdir cleanup on room deletion
-
-**Acceptance criteria**:
-- Starting bz creates Matrix rooms matching `bz.toml` channels
-- Rooms visible in Element with correct names
-- Room state includes `attached_ptys` (empty initially)
-- When PTY attaches, room state updates
-- Chat-only room can exist without directory
-- Spawning PTY in chat-only room creates tmpdir
-
-**Depends on**: Phase 4
-**Enables**: Phase 7
-
-### Phase 7: bz Matrix Integration
-
-Transform bz into a Matrix client that reads rooms and connects to chaperone PTYs.
-
-- [ ] Add matrix-sdk to bz
-- [ ] Login as user identity (same credentials as user chaperone? Or separate?)
-- [ ] Fetch room list from Matrix
-- [ ] Read `attached_ptys` from room state
-- [ ] Connect to chaperone PTY sockets based on room metadata
-- [ ] Sidebar shows rooms instead of hardcoded channels
-- [ ] Remove legacy bzd connection code
-
-**Acceptance criteria**:
-- bz starts and shows rooms from Matrix server in sidebar
-- Selecting a room shows its attached PTY (if any)
-- Terminal input/output works through chaperone PTY socket
+- First run creates `@<username>:localhost` account with password
+- bz shows room list in sidebar
 - Creating a room in Element appears in bz sidebar
-- No connection to bzd for PTY I/O (only Matrix for metadata)
+- Element can login as same user with password
+- Credentials persist across restarts
 
-**Depends on**: Phase 5, Phase 6
-**Enables**: Phase 8
+**Depends on**: Phase 1, Phase 3
+**Enables**: Phase 5
 
-### Phase 8: Chat View
+### Phase 5: Room ↔ PTY Integration
 
-Add chat as a view within channels (view multiplexing).
+Connect rooms to PTY management.
+
+- [ ] Auto-create rooms from `bz.toml` channel definitions on first run
+- [ ] Room state event for `attached_ptys` list
+- [ ] `Ctrl+B t` spawns shell PTY in user chaperone for current room (if none exists)
+- [ ] PTY attach updates room state via Matrix
+- [ ] Chat-only rooms get tmpdir on PTY spawn
+- [ ] Tmpdir cleanup on room deletion
+
+**Acceptance criteria**:
+- Starting bz creates Matrix rooms matching config channels
+- `Ctrl+B t` in a room spawns a PTY (visible in room state)
+- `Ctrl+B t` when PTY exists is noop (stretch: switches to that screen)
+- Room state `attached_ptys` updates on attach/detach
+- Chat-only room can spawn PTY (tmpdir created)
+
+**Depends on**: Phase 4
+**Enables**: Phase 6
+
+### Phase 6: Screen Navigation
+
+Implement h/l navigation between chat and PTYs.
+
+- [ ] Screen model: screen 1 = chat, screens 2..n = PTYs
+- [ ] `h` moves to previous screen, `l` moves to next screen
+- [ ] `j`/`k` unchanged — room navigation
+- [ ] Current screen indicator in UI
+- [ ] bz attaches to PTY only when viewing that screen
+- [ ] Detach from PTY when switching away
+
+**Acceptance criteria**:
+- Default view is chat (screen 1)
+- `l` switches to first PTY (screen 2) if attached
+- `h` switches back to chat
+- Switching screens attaches/detaches PTY connection
+- Screen indicator shows current position (e.g., "1/3")
+
+**Depends on**: Phase 5
+**Enables**: Phase 7
+
+### Phase 7: Chat View
+
+Full chat functionality in bz.
 
 - [ ] `ChatView` widget — message list, input line
-- [ ] View state per room: Chat | Workspace
-- [ ] View switching keybind (e.g., `Ctrl+B v`)
 - [ ] Message rendering (sender, timestamp, content)
 - [ ] Message composition and sending
-- [ ] Sync incoming messages to chat view
+- [ ] Sync incoming messages
+- [ ] Unread indicator when on PTY screen
+- [ ] Scroll through message history
 
 **Acceptance criteria**:
-- User can switch between chat and workspace views with keybind
-- Messages sent from Element appear in chat view
+- Messages sent from Element appear in bz chat view
 - Messages typed in bz appear in Element
-- View state persists per room (switching rooms remembers view)
-- Unread indicator when chat has new messages while in workspace view
+- Unread indicator shows when new messages arrive while on PTY screen
+- Can scroll through chat history
 
-**Depends on**: Phase 7
+**Depends on**: Phase 6
+**Enables**: Phase 8
+
+### Phase 8: bzd Agent Orchestration
+
+bzd spawns and manages agent chaperones.
+
+- [ ] Agent definition format in `bz.toml` (`[[agent]]` sections)
+- [ ] Spawn agent chaperones on bzd start (Matrix+PTY mode)
+- [ ] Track agent chaperone PIDs and control sockets
+- [ ] Auto-provision agent Matrix accounts (`@<name>:localhost`)
+- [ ] Agent credential storage at `~/.local/share/bz/matrix/agents/<name>/`
+- [ ] SIGTERM propagation on bzd shutdown
+- [ ] Aggregate PTY attachment state from agent chaperones
+
+**Acceptance criteria**:
+- `bz.toml` with `[[agent]]` sections spawns agent chaperones
+- Agents appear as Matrix users (visible in Element)
+- `ps aux | grep bzc` shows agent chaperone processes
+- Stopping bzd terminates all agent chaperones
+- Agent credentials persist across restarts
+
+**Depends on**: Phase 1, Phase 2
 **Enables**: Phase 9
 
-### Phase 9: Agent Chaperones & Invites
+### Phase 9: Agent Room Participation
 
-Agents get Matrix identities and can be invited to rooms.
+Agents can be invited to rooms and participate.
 
-- [ ] Agent definition format in config (name, persona, defaults)
-- [ ] Auto-provision agent accounts on bzd start
-- [ ] Agent credentials storage at `~/.local/share/bz/matrix/agents/<name>/`
+- [ ] Agent chaperone Matrix client setup (login as agent identity)
 - [ ] `/invite @agent:localhost` handling — agent joins room
-- [ ] Agent presence in sidebar (when in room)
+- [ ] Agent presence in bz sidebar (when in focused room)
 - [ ] DM support for agents
+- [ ] Agent can send messages to rooms
 
 **Acceptance criteria**:
-- Agents defined in config appear as Matrix users
 - `/invite @exo:localhost` in Element makes agent join room
 - Agent shows in bz sidebar when in focused room
 - Can DM agent from Element or bz
-- Agent credentials persist across restarts
+- Agent chaperone can send messages (for future interrupt responses)
 
 **Depends on**: Phase 8
 **Enables**: Phase 10
 
 ### Phase 10: Chaperone Lifecycle Commands
 
-Implement `/restart`, `/quit` DM commands for chaperone control.
+Implement `/restart`, `/quit` DM commands for agent control.
 
-- [ ] DM command parsing in chaperone
-- [ ] `/quit` — chaperone exits gracefully, bzd removes from roster
+- [ ] DM command parsing in agent chaperone
+- [ ] `/quit` — chaperone exits, bzd removes from roster
 - [ ] `/restart` — chaperone restarts (bzd respawns)
-- [ ] Confirmation message before destructive actions
-- [ ] User chaperone special handling (can't quit while bz connected?)
+- [ ] Confirmation message before exit
 
 **Acceptance criteria**:
 - DMing `/quit` to agent chaperone causes it to exit
 - DMing `/restart` to agent chaperone causes restart (new PID)
-- Chaperone sends confirmation "Shutting down..." before exit
-- User chaperone handles these commands appropriately
+- Chaperone sends confirmation before exit
 
 **Depends on**: Phase 9
 **Enables**: Phase 11
@@ -341,8 +355,8 @@ Agents show availability and can be interrupted.
 
 - [ ] Presence tracking: online/busy/idle based on PTY activity
 - [ ] Presence updates to Matrix
-- [ ] Presence display in sidebar
-- [ ] @mention detection in chaperone
+- [ ] Presence display in bz sidebar
+- [ ] @mention detection in agent chaperone
 - [ ] Interrupt protocol: suspend on @mention, resume after 1 min idle
 - [ ] Workspace state capture on interrupt
 
@@ -360,22 +374,26 @@ Agents show availability and can be interrupted.
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
-| Conduit embedding complexity | Medium | High | Evaluate library interface in Phase 1; sidecar fallback ready |
-| matrix-sdk tokio integration | Low | Medium | Both use tokio; test early in Phase 2 |
+| Conduit sidecar management | Medium | Medium | Health checks, restart on crash, clear error messages |
+| Conduit binary distribution | Medium | Medium | Document installation; consider bundling in release |
+| matrix-sdk tokio integration | Low | Medium | Both use tokio; test early in Phase 4 |
 | Multi-process coordination bugs | Medium | Medium | Comprehensive integration tests; clear protocol contracts |
-| PTY socket permission issues | Low | Low | Same user, standard Unix permissions; test on target platforms |
-| Resource usage (many processes) | Low | Medium | Profile in Phase 5; chaperones are lightweight |
-| View multiplexing UX confusion | Medium | Low | Start with 2 views only; iterate based on feedback |
+| User chaperone orphaning on bz crash | Medium | Low | Acceptable for v1; can add cleanup daemon later |
+| Screen navigation UX confusion | Medium | Low | Clear indicator; consistent h/l/j/k model |
 | Interrupt protocol edge cases | High | Medium | Simple default first (1 min idle); defer sophistication |
 
-## Open Questions
+## Resolved Questions
 
-1. **Conduit crates.io vs git** — Is conduit published? What version? Need to evaluate in Phase 1.
+1. **Conduit embedding** — Not viable as library; use managed sidecar instead.
 
-2. **User identity sharing** — Does bz login as the same user as user-chaperone, or separate? Separate seems cleaner but means two Matrix clients for "the human."
+2. **User identity** — bz is the human's Matrix client. User chaperone is PTY-only (no Matrix identity). No duplicate connections.
 
-3. **Mobile auth** — How does a user authenticate from Element mobile? Password set during first run? Acceptable to be local-only initially?
+3. **Mobile auth** — Password set during first run. User handles VPN/OIDC gating for network access.
 
-4. **Config hot-reload** — If user edits `bz.toml`, does bzd pick up changes? Probably not for v1 — restart required.
+4. **Config hot-reload** — No. Restart required.
 
-5. **PTY attachment UX** — PRD says `Ctrl+B t` but doesn't specify the interaction. Modal? Picker? Direct attach to current room?
+5. **PTY attachment UX** — `Ctrl+B t` spawns shell PTY if none exists for user in current room, sends attach event. Noop if one exists. Stretch goal: swap to that screen.
+
+6. **PTY move** — No dedicated move command. Use detach+attach sequence.
+
+7. **Who spawns user chaperone** — bz spawns its own user chaperone, not bzd. Decouples bzd from single-user assumptions.
