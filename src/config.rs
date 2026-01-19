@@ -13,6 +13,29 @@ pub struct Config {
     pub channel: Vec<ChannelConfig>,
     #[serde(default)]
     pub agent: Vec<AgentConfig>,
+    #[serde(default)]
+    pub matrix: MatrixConfig,
+}
+
+/// Matrix/Conduit configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct MatrixConfig {
+    /// Server name for Matrix federation (e.g., "localhost" or "bz.example.com")
+    /// This affects the domain part of user IDs like @user:server_name
+    #[serde(default = "default_server_name")]
+    pub server_name: String,
+}
+
+impl Default for MatrixConfig {
+    fn default() -> Self {
+        Self {
+            server_name: default_server_name(),
+        }
+    }
+}
+
+fn default_server_name() -> String {
+    "localhost".to_string()
 }
 
 /// Configuration for an AI agent
@@ -45,6 +68,23 @@ fn default_command() -> String {
 }
 
 impl Config {
+    /// Load configuration from a specific path
+    pub fn load_from(path: &std::path::Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let mut config: Config = toml::from_str(&content)?;
+
+        // Ensure at least one channel exists
+        if config.channel.is_empty() {
+            config.channel.push(ChannelConfig {
+                name: "default".into(),
+                cwd: None,
+                command: default_command(),
+            });
+        }
+
+        Ok(config)
+    }
+
     /// Load configuration from file
     ///
     /// Searches in order:
@@ -84,6 +124,7 @@ impl Config {
                 command: default_command(),
             }],
             agent: vec![],
+            matrix: MatrixConfig::default(),
         })
     }
 }

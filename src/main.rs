@@ -4,6 +4,8 @@ mod chaperone_channel;
 mod chaperone_pty;
 mod chat_view;
 mod config;
+mod daemon;
+mod log;
 mod matrix_client;
 mod picker;
 mod protocol;
@@ -14,8 +16,30 @@ mod terminal;
 mod user_chaperone;
 
 use std::env;
-use std::io::{self, stdout};
+use std::io::{self, stdout, IsTerminal, Write};
+use std::net::TcpStream;
+use std::process::{Command, Stdio};
 use std::time::Duration;
+
+use log::log;
+
+/// Find the bzd binary (checks target/debug, target/release, then PATH)
+fn find_bzd_binary() -> std::path::PathBuf {
+    // Check target/debug first (development)
+    let debug_path = std::path::PathBuf::from("target/debug/bzd");
+    if debug_path.exists() {
+        return debug_path;
+    }
+
+    // Check target/release
+    let release_path = std::path::PathBuf::from("target/release/bzd");
+    if release_path.exists() {
+        return release_path;
+    }
+
+    // Fall back to PATH
+    std::path::PathBuf::from("bzd")
+}
 
 use color_eyre::eyre::Result;
 use crossterm::{
@@ -227,21 +251,37 @@ async fn main() -> Result<()> {
 
     // Parse CLI args
     let args: Vec<String> = env::args().collect();
+    let mut config_path: Option<std::path::PathBuf> = None;
 
-    // Handle subcommands
-    if args.len() > 1 {
-        match args[1].as_str() {
+    // Handle args
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
             "--help" | "-h" => {
                 println!("bz - Multi-agent coordination TUI");
                 println!();
                 println!("Usage: bz [OPTIONS]");
                 println!();
                 println!("Options:");
-                println!("  --help      Show this help");
+                println!("  --config <path>  Use specific config file");
+                println!("  --help           Show this help");
                 return Ok(());
+            }
+            "--config" => {
+                i += 1;
+                if i < args.len() {
+                    config_path = Some(std::path::PathBuf::from(&args[i]));
+                } else {
+                    eprintln!("bz: --config requires a path argument");
+                    return Ok(());
+                }
+            }
+            arg if arg.starts_with("--config=") => {
+                config_path = Some(std::path::PathBuf::from(arg.trim_start_matches("--config=")));
             }
             _ => {}
         }
+        i += 1;
     }
 
     // Set up panic hook to restore terminal on panic
@@ -257,15 +297,114 @@ async fn main() -> Result<()> {
         original_hook(panic);
     }));
 
+    // Verify we're connected to a TTY (required for TUI)
+    if !stdout().is_terminal() {
+        eprintln!("bz: error: not connected to a terminal");
+        eprintln!("bz: the TUI requires an interactive terminal to run");
+        eprintln!("bz: hint: a headless mode for programmatic control is planned");
+        return Ok(());
+    }
+
     // Load configuration
-    let config = Config::load()?;
+    log("bz startup");
+    let config = match &config_path {
+        Some(path) => {
+            log(&format!("loading config from {:?}", path));
+            Config::load_from(path)?
+        }
+        None => Config::load()?
+    };
+    log(&format!("config loaded: {} channels", config.channel.len()));
+
+    // Ensure bzd is running (provides Matrix/Conduit sidecar)
+    let existing_session = daemon::find_session();
+    log(&format!("find_session result: {:?}", existing_session));
+
+    // Verify session is actually alive (not a stale socket)
+    let session_alive = existing_session.as_ref().map_or(false, |path| {
+        std::os::unix::net::UnixStream::connect(path).is_ok()
+    });
+    log(&format!("session_alive: {}", session_alive));
+
+    if !session_alive {
+        // Clean up stale socket if it exists
+        if let Some(ref path) = existing_session {
+            log(&format!("removing stale socket: {:?}", path));
+            let _ = std::fs::remove_file(path);
+            // Also remove stale pid file
+            let _ = std::fs::remove_file(path.with_extension("pid"));
+        }
+
+        // Ensure Conduit config exists with correct server_name
+        log(&format!("ensuring Conduit config with server_name: {}", config.matrix.server_name));
+        if let Err(e) = daemon::conduit::ensure_config(&config.matrix.server_name) {
+            log(&format!("failed to ensure Conduit config: {}", e));
+        }
+
+        log("no existing bzd session, spawning new one");
+        // Get terminal size for bzd
+        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+        log(&format!("terminal size: {}x{}", cols, rows));
+
+        // Spawn bzd - it will daemonize and print socket path
+        let bzd_path = find_bzd_binary();
+        log(&format!("using bzd binary: {:?}", bzd_path));
+        let output = Command::new(&bzd_path)
+            .args([
+                rows.to_string(),
+                cols.to_string(),
+                "--server-name".to_string(),
+                config.matrix.server_name.clone(),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .output();
+
+        match output {
+            Ok(out) => {
+                let socket_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                log(&format!("bzd spawned, socket: '{}', exit status: {:?}", socket_path, out.status));
+                if !socket_path.is_empty() {
+                    eprintln!("bz: started bzd (socket: {})", socket_path);
+                }
+            }
+            Err(e) => {
+                log(&format!("bzd spawn failed: {}", e));
+                eprintln!("bz: failed to start bzd: {} (continuing without Matrix)", e);
+            }
+        }
+
+        // Wait for Conduit to become available (up to 5 seconds)
+        log("waiting for Conduit on port 6167...");
+        let mut conduit_ready = false;
+        for i in 0..50 {
+            if TcpStream::connect_timeout(
+                &"127.0.0.1:6167".parse().unwrap(),
+                Duration::from_millis(100),
+            ).is_ok() {
+                log(&format!("Conduit ready after {}ms", i * 100));
+                conduit_ready = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if !conduit_ready {
+            log("Conduit not ready after 5s timeout");
+        }
+    } else {
+        log("existing bzd session is alive, skipping spawn");
+    }
 
     // Spawn user chaperone (kept alive for app lifetime, cleaned up on exit)
+    log("spawning user chaperone");
     let mut user_chaperone = UserChaperone::spawn()?;
     user_chaperone.wait_ready().await?;
+    log("user chaperone ready");
 
     // Connect to Matrix (Conduit should be running via bzd)
     // TODO: Make homeserver/credentials configurable
+    log("connecting to Matrix at localhost:6167");
     let mut channel_room_map: HashMap<String, String> = HashMap::new();
     let mut message_rx: Option<tokio::sync::mpsc::Receiver<crate::matrix_client::MatrixMessage>> = None;
     let matrix_client = match BzMatrixClient::register_or_login(
@@ -276,32 +415,49 @@ async fn main() -> Result<()> {
     .await
     {
         Ok(client) => {
+            log(&format!("Matrix login successful: {}", client.user_id()));
+            log("starting Matrix sync");
             message_rx = Some(client.start_sync());
 
             // Wait briefly for initial sync to populate rooms
+            log("waiting 500ms for initial sync");
             tokio::time::sleep(Duration::from_millis(500)).await;
 
-            // Create Matrix rooms for channels from config
+            // Create Matrix rooms for channels from config (with timeout)
+            log("ensuring rooms for channels");
             let channel_names: Vec<String> = config.channel.iter().map(|c| c.name.clone()).collect();
-            match client.ensure_rooms_for_channels(&channel_names).await {
-                Ok(mappings) => {
+            match tokio::time::timeout(
+                Duration::from_secs(5),
+                client.ensure_rooms_for_channels(&channel_names)
+            ).await {
+                Ok(Ok(mappings)) => {
+                    log(&format!("got {} room mappings", mappings.len()));
                     for (name, room_id) in mappings {
                         channel_room_map.insert(name, room_id);
                     }
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
+                    log(&format!("failed to ensure rooms: {}", e));
                     eprintln!("bz: failed to ensure rooms: {}", e);
+                }
+                Err(_) => {
+                    log("ensure_rooms timed out after 5s");
+                    eprintln!("bz: room setup timed out (continuing without Matrix rooms)");
                 }
             }
 
+            log("rooms ensured, Matrix setup complete");
             Some(client)
         }
         Err(e) => {
+            log(&format!("Matrix connection failed: {}", e));
             eprintln!("bz: Matrix connection failed: {} (continuing without Matrix)", e);
             None
         }
     };
+    log(&format!("Matrix client initialized: {}", matrix_client.is_some()));
 
+    log("entering TUI setup");
     // Set up terminal first to get size
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -361,7 +517,7 @@ async fn main() -> Result<()> {
                 command: ch_config.command.clone(),
             };
             if let Err(e) = client.attach_pty(&room_id, pty).await {
-                eprintln!("bz: failed to register PTY in room state: {}", e);
+                log(&format!("failed to register PTY in room state: {}", e));
             }
         }
 
@@ -375,6 +531,11 @@ async fn main() -> Result<()> {
 
     // Run the app
     let result = run(&mut terminal, &mut app, &mut user_chaperone, &mut message_rx).await;
+
+    // Drain any buffered terminal events to prevent them leaking to underlying terminal
+    while crossterm::event::poll(Duration::from_millis(0))? {
+        let _ = crossterm::event::read();
+    }
 
     // Restore terminal
     disable_raw_mode()?;
@@ -699,11 +860,12 @@ async fn run(
                                             _ => {}
                                         }
                                     }
-                                } else if key.code == KeyCode::PageUp && app.on_pty_screen() {
-                                    if let Some(pty) = app.current_pty_mut() {
-                                        let page = pty.screen().size().0 as usize;
-                                        pty.scroll_up(page.saturating_sub(2));
-                                    }
+                                // TODO: revisit PageUp/PageDown intercept for scroll mode
+                                // } else if key.code == KeyCode::PageUp && app.on_pty_screen() {
+                                //     if let Some(pty) = app.current_pty_mut() {
+                                //         let page = pty.screen().size().0 as usize;
+                                //         pty.scroll_up(page.saturating_sub(2));
+                                //     }
                                 } else if key.code == KeyCode::Char('b')
                                     && key.modifiers.contains(KeyModifiers::CONTROL)
                                 {
@@ -730,34 +892,18 @@ async fn run(
                                     // Chat screen - handle input
                                     match key.code {
                                         KeyCode::Enter => {
-                                            // Send message
+                                            // Send message via Matrix (will appear when sync receives it)
                                             if let Some(chat_state) = app.focused_room_mut().chat_state_mut() {
                                                 let message = chat_state.take_input();
                                                 if !message.is_empty() {
                                                     let room_id = app.focused_room().room_id.clone();
-                                                    // Add to local chat immediately (optimistic)
-                                                    let timestamp = chrono::Local::now().format("%H:%M").to_string();
-                                                    let chat_msg = crate::chat_view::ChatMessage::new(
-                                                        "me".to_string(),
-                                                        message.clone(),
-                                                        timestamp,
-                                                        true,
-                                                    );
-                                                    if let Some(chat_state) = app.focused_room_mut().chat_state_mut() {
-                                                        chat_state.add_message(chat_msg);
-                                                    }
-                                                    // Send via Matrix
                                                     if let Some(ref client) = app.matrix_client {
                                                         let client = client.client().clone();
-                                                        let room_id_owned = room_id.clone();
-                                                        let message_owned = message.clone();
                                                         tokio::spawn(async move {
-                                                            if let Ok(room_id) = room_id_owned.parse::<matrix_sdk::ruma::OwnedRoomId>() {
+                                                            if let Ok(room_id) = room_id.parse::<matrix_sdk::ruma::OwnedRoomId>() {
                                                                 if let Some(room) = client.get_room(&room_id) {
-                                                                    let content = matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&message_owned);
-                                                                    if let Err(e) = room.send(content).await {
-                                                                        eprintln!("bz: failed to send message: {}", e);
-                                                                    }
+                                                                    let content = matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&message);
+                                                                    let _ = room.send(content).await;
                                                                 }
                                                             }
                                                         });
@@ -857,7 +1003,7 @@ async fn run(
                                                 // Create tmpdir for chat-only rooms
                                                 let tmpdir = format!("/tmp/bz-room-{}", room_id.replace(':', "_").replace('!', ""));
                                                 if let Err(e) = std::fs::create_dir_all(&tmpdir) {
-                                                    eprintln!("bz: failed to create tmpdir: {}", e);
+                                                    log(&format!("failed to create tmpdir: {}", e));
                                                 }
                                                 Some(tmpdir)
                                             });
@@ -888,7 +1034,7 @@ async fn run(
                                                                 command: std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string()),
                                                             };
                                                             if let Err(e) = client.attach_pty(&room_id, pty).await {
-                                                                eprintln!("bz: failed to register PTY: {}", e);
+                                                                log(&format!("failed to register PTY: {}", e));
                                                             }
                                                         }
 
@@ -896,12 +1042,12 @@ async fn run(
                                                         app.focused_room_mut().add_pty(channel, true);
                                                     }
                                                     Err(e) => {
-                                                        eprintln!("bz: failed to connect to PTY: {}", e);
+                                                        log(&format!("failed to connect to PTY: {}", e));
                                                     }
                                                 }
                                             }
                                             Err(e) => {
-                                                eprintln!("bz: failed to spawn PTY: {}", e);
+                                                log(&format!("failed to spawn PTY: {}", e));
                                             }
                                         }
                                     }

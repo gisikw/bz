@@ -5,6 +5,7 @@
 
 pub mod channel;
 pub mod chaperone;
+pub mod log;
 pub mod chaperone_channel;
 pub mod chaperone_pty;
 pub mod chat_view;

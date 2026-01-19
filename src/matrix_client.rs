@@ -9,7 +9,10 @@ use color_eyre::eyre::{eyre, Result, WrapErr};
 use matrix_sdk::{
     config::SyncSettings,
     ruma::{
-        api::client::account::register::v3::Request as RegistrationRequest,
+        api::client::{
+            account::register::v3::Request as RegistrationRequest,
+            uiaa::{AuthData, Dummy},
+        },
         events::{
             room::message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent},
             StateEventType,
@@ -197,10 +200,11 @@ impl BzMatrixClient {
             }
         }
 
-        // Try registration
+        // Try registration with dummy auth (Conduit requires UIAA)
         let mut request = RegistrationRequest::new();
         request.username = Some(username.to_string());
         request.password = Some(password.to_string());
+        request.auth = Some(AuthData::Dummy(Dummy::new()));
 
         let response = client
             .matrix_auth()
@@ -211,23 +215,41 @@ impl BzMatrixClient {
         let user_id = response.user_id;
         eprintln!("bz: registered new user {}", user_id);
 
-        // Get access token from session (registration should have set it)
-        let access_token = client
-            .session()
-            .map(|s| s.access_token().to_string())
+        // Get access token and device_id from registration response
+        let access_token = response
+            .access_token
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        let device_id = response
+            .device_id
+            .map(|d| d.to_string())
             .unwrap_or_default();
 
         // Save credentials
         let creds = StoredCredentials {
             user_id: user_id.to_string(),
-            device_id: response
-                .device_id
-                .map(|d| d.to_string())
-                .unwrap_or_default(),
-            access_token,
+            device_id: device_id.clone(),
+            access_token: access_token.clone(),
             homeserver: homeserver.to_string(),
         };
         creds.save()?;
+
+        // Restore session on the client so it can make authenticated requests
+        let session = matrix_sdk::matrix_auth::MatrixSession {
+            meta: matrix_sdk::SessionMeta {
+                user_id: user_id.clone(),
+                device_id: device_id.as_str().into(),
+            },
+            tokens: matrix_sdk::matrix_auth::MatrixSessionTokens {
+                access_token,
+                refresh_token: None,
+            },
+        };
+        client
+            .matrix_auth()
+            .restore_session(session)
+            .await
+            .wrap_err("Failed to set session after registration")?;
 
         Ok(Self { client, user_id })
     }
@@ -306,23 +328,41 @@ impl BzMatrixClient {
         let user_id = response.user_id;
         eprintln!("bzc: registered new agent {}", user_id);
 
-        // Get access token from session
-        let access_token = client
-            .session()
-            .map(|s| s.access_token().to_string())
+        // Get access token and device_id from registration response
+        let access_token = response
+            .access_token
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        let device_id = response
+            .device_id
+            .map(|d| d.to_string())
             .unwrap_or_default();
 
         // Save credentials
         let creds = StoredCredentials {
             user_id: user_id.to_string(),
-            device_id: response
-                .device_id
-                .map(|d| d.to_string())
-                .unwrap_or_default(),
-            access_token,
+            device_id: device_id.clone(),
+            access_token: access_token.clone(),
             homeserver: homeserver.to_string(),
         };
         creds.save_to(&creds_path)?;
+
+        // Restore session on the client so it can make authenticated requests
+        let session = matrix_sdk::matrix_auth::MatrixSession {
+            meta: matrix_sdk::SessionMeta {
+                user_id: user_id.clone(),
+                device_id: device_id.as_str().into(),
+            },
+            tokens: matrix_sdk::matrix_auth::MatrixSessionTokens {
+                access_token,
+                refresh_token: None,
+            },
+        };
+        client
+            .matrix_auth()
+            .restore_session(session)
+            .await
+            .wrap_err("Failed to set session after agent registration")?;
 
         Ok(Self { client, user_id })
     }
@@ -379,10 +419,13 @@ impl BzMatrixClient {
                 let tx = tx.clone();
                 let own_user_id = own_user_id.clone();
                 async move {
-                    // Skip messages from ourselves
-                    if event.sender == own_user_id {
-                        return;
-                    }
+                    // Debug: log all incoming messages
+                    crate::log::log(&format!("sync received message from {} in {}", event.sender, room.room_id()));
+
+                    // TODO: track sent message IDs to dedupe only messages from THIS client
+                    // For now, allow all messages through (may show duplicates for messages
+                    // sent from TUI, but allows multi-client use case like Element + TUI)
+                    let _ = own_user_id; // silence unused warning
 
                     // Extract text content
                     let content = match &event.content.msgtype {

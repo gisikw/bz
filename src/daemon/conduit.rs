@@ -25,15 +25,22 @@ fn database_path() -> PathBuf {
     data_dir().join("matrix")
 }
 
-/// Generate Conduit configuration file if it doesn't exist
+/// Generate Conduit configuration file
 ///
+/// Writes config if it doesn't exist or if server_name changed.
 /// Returns the path to the config file.
-pub fn ensure_config() -> Result<PathBuf> {
+pub fn ensure_config(server_name: &str) -> Result<PathBuf> {
     let config_path = config_path();
 
-    // Don't overwrite existing config
+    // Check if config exists and has correct server_name
     if config_path.exists() {
-        return Ok(config_path);
+        if let Ok(content) = std::fs::read_to_string(&config_path) {
+            let expected = format!("server_name = \"{}\"", server_name);
+            if content.contains(&expected) {
+                return Ok(config_path);
+            }
+            // server_name changed, will regenerate
+        }
     }
 
     // Ensure parent directories exist
@@ -49,13 +56,14 @@ pub fn ensure_config() -> Result<PathBuf> {
 
     let config_content = format!(
         r#"[global]
-server_name = "localhost"
+server_name = "{}"
 database_backend = "rocksdb"
 database_path = "{}"
-port = 8448
+port = 6167
 address = "127.0.0.1"
 allow_registration = true
 "#,
+        server_name,
         db_path.display()
     );
 
@@ -66,7 +74,7 @@ allow_registration = true
 }
 
 /// Conduit port for API access
-pub const CONDUIT_PORT: u16 = 8448;
+pub const CONDUIT_PORT: u16 = 6167;
 
 /// Managed Conduit process
 pub struct ConduitProcess {
@@ -159,8 +167,9 @@ impl Drop for ConduitProcess {
 /// Spawn Conduit with auto-generated config
 ///
 /// Convenience function that ensures config exists and spawns the process.
+/// Uses "localhost" as default server_name.
 pub fn spawn_conduit() -> Result<ConduitProcess> {
-    let config_path = ensure_config()?;
+    let config_path = ensure_config("localhost")?;
     ConduitProcess::spawn(&config_path)
 }
 
@@ -198,7 +207,7 @@ mod tests {
 server_name = "localhost"
 database_backend = "rocksdb"
 database_path = "{}"
-port = 8448
+port = 6167
 address = "127.0.0.1"
 allow_registration = true
 "#,

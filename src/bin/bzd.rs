@@ -16,17 +16,38 @@ use bz::daemon::conduit;
 fn main() -> Result<()> {
     color_eyre::install()?;
 
-    // Parse args: bzd <rows> <cols> [--foreground]
+    // Parse args: bzd <rows> <cols> [--foreground] [--server-name <name>]
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 3 {
-        eprintln!("Usage: bzd <rows> <cols> [--foreground]");
+        eprintln!("Usage: bzd <rows> <cols> [--foreground] [--server-name <name>]");
         std::process::exit(1);
     }
 
     let rows: u16 = args[1].parse().unwrap_or(24);
     let cols: u16 = args[2].parse().unwrap_or(80);
-    let foreground = args.get(3).map(|s| s == "--foreground").unwrap_or(false);
+
+    // Parse optional flags
+    let mut foreground = false;
+    let mut server_name = "localhost".to_string();
+
+    let mut i = 3;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--foreground" => foreground = true,
+            "--server-name" => {
+                i += 1;
+                if i < args.len() {
+                    server_name = args[i].clone();
+                }
+            }
+            arg if arg.starts_with("--server-name=") => {
+                server_name = arg.trim_start_matches("--server-name=").to_string();
+            }
+            _ => {}
+        }
+        i += 1;
+    }
 
     // Load config
     let config = Config::load()?;
@@ -84,7 +105,9 @@ fn main() -> Result<()> {
     }
 
     // Spawn Conduit (must keep handle alive for process lifetime)
-    let _conduit = conduit::spawn_conduit()?;
+    // Use server_name from CLI arg (passed by bz from its config)
+    let config_path = conduit::ensure_config(&server_name)?;
+    let _conduit = conduit::ConduitProcess::spawn(&config_path)?;
 
     // Run daemon (in foreground or after daemonizing)
     let rt = tokio::runtime::Runtime::new()?;
