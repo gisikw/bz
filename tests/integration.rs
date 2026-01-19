@@ -5,6 +5,20 @@
 //! **Note**: These tests require a real TTY environment to run.
 //! They may not work in CI or sandboxed environments.
 //!
+//! ## Environment Variables for Isolation
+//!
+//! To run tests without interfering with a production bz instance:
+//! - `BZ_SESSION_DIR`: Daemon socket directory (set automatically by tests)
+//! - `BZ_DATA_DIR`: Data directory (Conduit config/database, logs)
+//! - `BZ_CONDUIT_PORT`: Matrix server port (default: 6167)
+//!
+//! ## Running Tests
+//!
+//! ```sh
+//! # Run with isolated data directory and port:
+//! BZ_DATA_DIR=/tmp/bz-test BZ_CONDUIT_PORT=16167 cargo test --test integration -- --ignored
+//! ```
+//!
 //! Run with: cargo test --test integration
 //!
 //! To skip in CI: cargo test --test integration -- --ignored
@@ -53,6 +67,7 @@ fn cleanup_session_dir(session_dir: &str) {
 
 /// Test: spawn bz, verify shell renders, send Ctrl+B q to detach
 #[test]
+#[ignore = "requires TTY - run manually with: cargo test --test integration -- --ignored"]
 fn test_bz_spawns_shell_and_renders() -> Result<()> {
     use portable_pty::{native_pty_system, PtySize};
     use std::io::{Read, Write};
@@ -159,6 +174,7 @@ fn test_bz_spawns_shell_and_renders() -> Result<()> {
 
 /// Test input forwarding: send a command, verify it appears in output
 #[test]
+#[ignore = "requires TTY - run manually with: cargo test --test integration -- --ignored"]
 fn test_input_forwarding() -> Result<()> {
     use portable_pty::{native_pty_system, PtySize};
     use std::io::{Read, Write};
@@ -279,6 +295,7 @@ fn test_input_forwarding() -> Result<()> {
 
 /// Test tab switching: Ctrl+B n cycles through channels (leader mode)
 #[test]
+#[ignore = "requires TTY - run manually with: cargo test --test integration -- --ignored"]
 fn test_tab_switching() -> Result<()> {
     use portable_pty::{native_pty_system, PtySize};
     use std::io::{Read, Write};
@@ -427,6 +444,7 @@ fn test_tab_switching() -> Result<()> {
 
 /// Test activity detection: unfocused channels show activity markers
 #[test]
+#[ignore = "requires TTY - run manually with: cargo test --test integration -- --ignored"]
 fn test_activity_detection() -> Result<()> {
     use portable_pty::{native_pty_system, PtySize};
     use std::io::{Read, Write};
@@ -559,6 +577,7 @@ fn test_activity_detection() -> Result<()> {
 
 /// Test: sidebar auto-hides on narrow (mobile) terminals
 #[test]
+#[ignore = "requires TTY - run manually with: cargo test --test integration -- --ignored"]
 fn test_sidebar_hides_on_mobile() -> Result<()> {
     use portable_pty::{native_pty_system, PtySize};
     use std::io::{Read, Write};

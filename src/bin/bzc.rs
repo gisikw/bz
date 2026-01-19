@@ -10,12 +10,11 @@ use color_eyre::eyre::{eyre, Result};
 use tokio::signal::unix::{signal, SignalKind};
 
 use bz::chaperone::{Chaperone, ChaperoneConfig, ChaperoneMode};
+use bz::env;
 
 /// Path to agent credentials file
 fn agent_credentials_path(name: &str) -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(format!("bz/matrix/agent-{}.json", name))
+    env::data_dir().join(format!("matrix/agent-{}.json", name))
 }
 
 fn main() -> Result<()> {
@@ -71,7 +70,7 @@ fn main() -> Result<()> {
                 eprintln!("bzc: connecting to Matrix as agent '{}'", agent_name);
 
                 match bz::matrix_client::BzMatrixClient::agent_register_or_login(
-                    "http://localhost:6167",
+                    &env::conduit_url(),
                     agent_name,
                     &password,
                 ).await {

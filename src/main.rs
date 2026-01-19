@@ -5,6 +5,7 @@ mod chaperone_pty;
 mod chat_view;
 mod config;
 mod daemon;
+mod env;
 mod log;
 mod matrix_client;
 mod picker;
@@ -14,8 +15,6 @@ mod room_view;
 mod sidebar;
 mod terminal;
 mod user_chaperone;
-
-use std::env;
 use std::io::{self, stdout, IsTerminal, Write};
 use std::net::TcpStream;
 use std::process::{Command, Stdio};
@@ -250,7 +249,7 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
 
     // Parse CLI args
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = std::env::args().collect();
     let mut config_path: Option<std::path::PathBuf> = None;
 
     // Handle args
@@ -376,13 +375,11 @@ async fn main() -> Result<()> {
         }
 
         // Wait for Conduit to become available (up to 5 seconds)
-        log("waiting for Conduit on port 6167...");
+        log(&format!("waiting for Conduit on port {}...", env::conduit_port()));
         let mut conduit_ready = false;
         for i in 0..50 {
-            if TcpStream::connect_timeout(
-                &"127.0.0.1:6167".parse().unwrap(),
-                Duration::from_millis(100),
-            ).is_ok() {
+            if TcpStream::connect_timeout(&env::conduit_addr(), Duration::from_millis(100)).is_ok()
+            {
                 log(&format!("Conduit ready after {}ms", i * 100));
                 conduit_ready = true;
                 break;
@@ -404,11 +401,11 @@ async fn main() -> Result<()> {
 
     // Connect to Matrix (Conduit should be running via bzd)
     // TODO: Make homeserver/credentials configurable
-    log("connecting to Matrix at localhost:6167");
+    log(&format!("connecting to Matrix at {}", env::conduit_url()));
     let mut channel_room_map: HashMap<String, String> = HashMap::new();
     let mut message_rx: Option<tokio::sync::mpsc::Receiver<crate::matrix_client::MatrixMessage>> = None;
     let matrix_client = match BzMatrixClient::register_or_login(
-        "http://localhost:6167",
+        &env::conduit_url(),
         "bz-user",
         "bz-password", // TODO: Generate or prompt for password
     )

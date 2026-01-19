@@ -17,24 +17,13 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::config::{AgentConfig, Config};
+use crate::env;
 use crate::protocol::{
     encode, decode, ClientMessage, DaemonMessage, PtyConfig, SessionInfo,
 };
 
 use pty_manager::PtyManager;
 use std::process::{Child, Command};
-
-/// Session state directory
-/// Can be overridden with BZ_SESSION_DIR env var (useful for testing)
-fn session_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("BZ_SESSION_DIR") {
-        return PathBuf::from(dir);
-    }
-    dirs::state_dir()
-        .or_else(|| dirs::data_local_dir())
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("bz/sessions")
-}
 
 /// Hash the config for change detection
 fn hash_config(config: &Config) -> u64 {
@@ -88,7 +77,7 @@ impl Daemon {
         let pty_manager = PtyManager::new(rows, cols);
 
         // Create session directory
-        let session_dir = session_dir();
+        let session_dir = env::session_dir();
         std::fs::create_dir_all(&session_dir)?;
 
         let socket_path = session_dir.join(format!("{}.sock", session_id));
@@ -119,7 +108,7 @@ impl Daemon {
 
     /// Spawn agent chaperone processes
     pub fn spawn_agents(&mut self, config: &Config) -> Result<()> {
-        let agents_dir = session_dir().join("agents");
+        let agents_dir = env::session_dir().join("agents");
         std::fs::create_dir_all(&agents_dir)?;
 
         for agent in &config.agent {
@@ -437,7 +426,7 @@ async fn write_message_owned(
 
 /// Find existing session socket
 pub fn find_session() -> Option<PathBuf> {
-    let session_dir = session_dir();
+    let session_dir = env::session_dir();
     if !session_dir.exists() {
         return None;
     }

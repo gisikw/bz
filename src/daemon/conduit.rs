@@ -8,21 +8,16 @@ use std::time::Duration;
 
 use color_eyre::eyre::{Result, WrapErr};
 
-/// Data directory for bz (contains Conduit config and database)
-fn data_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("bz")
-}
+use crate::env;
 
 /// Path to Conduit configuration file
 pub fn config_path() -> PathBuf {
-    data_dir().join("conduit.toml")
+    env::data_dir().join("conduit.toml")
 }
 
 /// Path to Conduit database directory
 fn database_path() -> PathBuf {
-    data_dir().join("matrix")
+    env::data_dir().join("matrix")
 }
 
 /// Generate Conduit configuration file
@@ -59,12 +54,13 @@ pub fn ensure_config(server_name: &str) -> Result<PathBuf> {
 server_name = "{}"
 database_backend = "rocksdb"
 database_path = "{}"
-port = 6167
+port = {}
 address = "127.0.0.1"
 allow_registration = true
 "#,
         server_name,
-        db_path.display()
+        db_path.display(),
+        env::conduit_port()
     );
 
     std::fs::write(&config_path, config_content)
@@ -72,9 +68,6 @@ allow_registration = true
 
     Ok(config_path)
 }
-
-/// Conduit port for API access
-pub const CONDUIT_PORT: u16 = 6167;
 
 /// Managed Conduit process
 pub struct ConduitProcess {
@@ -120,11 +113,7 @@ impl ConduitProcess {
         // A full HTTP check would require adding a dependency
         use std::net::TcpStream;
 
-        TcpStream::connect_timeout(
-            &format!("127.0.0.1:{}", CONDUIT_PORT).parse().unwrap(),
-            Duration::from_secs(1),
-        )
-        .is_ok()
+        TcpStream::connect_timeout(&env::conduit_addr(), Duration::from_secs(1)).is_ok()
     }
 
     /// Combined health check: process running AND API responding
@@ -201,17 +190,18 @@ mod tests {
         let db_path = temp_dir.path().join("matrix");
         std::fs::create_dir_all(&db_path).expect("Failed to create db dir");
 
-        // Write test config
+        // Write test config (uses env::conduit_port() for consistency)
         let config_content = format!(
             r#"[global]
 server_name = "localhost"
 database_backend = "rocksdb"
 database_path = "{}"
-port = 6167
+port = {}
 address = "127.0.0.1"
 allow_registration = true
 "#,
-            db_path.display()
+            db_path.display(),
+            env::conduit_port()
         );
         std::fs::File::create(&config_path)
             .and_then(|mut f| f.write_all(config_content.as_bytes()))

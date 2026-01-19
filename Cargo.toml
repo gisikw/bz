@@ -53,6 +53,10 @@ path = "src/bin/bzd.rs"
 name = "bzc"
 path = "src/bin/bzc.rs"
 
+[[bin]]
+name = "bz-pty-driver"
+path = "src/bin/bz-pty-driver.rs"
+
 [profile.release]
 strip = true
 lto = true

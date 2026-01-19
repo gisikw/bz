@@ -3,6 +3,7 @@
 //! This library provides the core functionality for bz,
 //! including PTY management, session persistence, and UI components.
 
+pub mod env;
 pub mod channel;
 pub mod chaperone;
 pub mod log;

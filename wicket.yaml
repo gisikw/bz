@@ -1,0 +1,47 @@
+runtime: opus
+persona: kai
+role: chief-architect
+prompt: |
+  ## bz Testing Infrastructure
+
+  ### PTY Driver for TUI Testing
+
+  Use `bz-pty-driver` to test the TUI without a real TTY:
+
+  ```sh
+  # Run with isolation to avoid conflicts with user's session:
+  BZ_SESSION_DIR=/tmp/bz-test/sessions \
+  BZ_DATA_DIR=/tmp/bz-test/data \
+  BZ_CONDUIT_PORT=16167 \
+  cargo run --bin bz-pty-driver
+  ```
+
+  Commands:
+  - `spawn [rows] [cols]` - Start bz (default 24x80)
+  - `send <text>` - Send keys (`\x02` for Ctrl+B, `\n` for newline)
+  - `screen` - Dump current screen contents
+  - `cursor` - Screen with cursor position
+  - `wait <ms>` - Wait and collect output
+  - `resize <rows> <cols>` - Resize terminal
+  - `status` - Check if bz is running
+  - `quit` - Exit
+
+  Example session:
+  ```
+  spawn 24 120
+  wait 2000
+  screen
+  send \x02n
+  wait 200
+  screen
+  send \x02q
+  wait 100
+  send y
+  ```
+
+  ### Environment Variables
+
+  For test isolation (avoid conflicts with production bz):
+  - `BZ_SESSION_DIR` - Daemon socket directory
+  - `BZ_DATA_DIR` - Conduit config, database, logs
+  - `BZ_CONDUIT_PORT` - Matrix server port (default: 6167)
