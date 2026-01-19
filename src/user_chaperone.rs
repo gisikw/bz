@@ -91,6 +91,8 @@ impl UserChaperone {
         room_id: &str,
         cwd: Option<&str>,
         command: Option<&str>,
+        rows: u16,
+        cols: u16,
     ) -> Result<PathBuf> {
         let stream = self
             .control_stream
@@ -101,6 +103,8 @@ impl UserChaperone {
             room_id: room_id.to_string(),
             cwd: cwd.map(String::from),
             command: command.map(String::from),
+            rows,
+            cols,
         };
 
         let encoded = protocol::encode(&msg)?;
@@ -109,12 +113,7 @@ impl UserChaperone {
         // Wait for PtyAttached response
         let response = read_control_message(stream).await?;
         match response {
-            ControlMessage::PtyAttached {
-                pty_id, socket, ..
-            } => {
-                eprintln!("PTY spawned: {} at {}", pty_id, socket);
-                Ok(PathBuf::from(socket))
-            }
+            ControlMessage::PtyAttached { socket, .. } => Ok(PathBuf::from(socket)),
             other => Err(eyre!("Expected PtyAttached, got {:?}", other)),
         }
     }

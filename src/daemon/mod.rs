@@ -123,13 +123,8 @@ impl Daemon {
         std::fs::create_dir_all(&agents_dir)?;
 
         for agent in &config.agent {
-            match self.spawn_agent(&agents_dir, agent) {
-                Ok(()) => {
-                    eprintln!("bzd: spawned agent chaperone '{}'", agent.name);
-                }
-                Err(e) => {
-                    eprintln!("bzd: failed to spawn agent '{}': {}", agent.name, e);
-                }
+            if let Err(e) = self.spawn_agent(&agents_dir, agent) {
+                eprintln!("bzd: failed to spawn agent '{}': {}", agent.name, e);
             }
         }
         Ok(())
@@ -172,7 +167,6 @@ mode = "matrix"
     /// Terminate all agent chaperone processes
     pub fn terminate_agents(&mut self) {
         for mut agent in self.agent_processes.drain(..) {
-            eprintln!("bzd: terminating agent '{}'", agent.name);
             let _ = agent.child.kill();
             let _ = agent.child.wait();
             let _ = std::fs::remove_file(&agent.config_path);

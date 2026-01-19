@@ -83,8 +83,6 @@ impl Chaperone {
         let listener = UnixListener::bind(&socket_path)
             .wrap_err_with(|| format!("Failed to bind control socket: {}", socket_path.display()))?;
 
-        eprintln!("bzc: control socket ready at {}", socket_path.display());
-
         // Accept connections
         loop {
             match listener.accept().await {
@@ -139,6 +137,8 @@ impl Chaperone {
                 room_id,
                 cwd,
                 command,
+                rows,
+                cols,
             } => {
                 let cmd = command.unwrap_or_else(|| {
                     std::env::var("SHELL").unwrap_or_else(|_| "bash".into())
@@ -147,8 +147,8 @@ impl Chaperone {
                 let config = PtySpawnConfig {
                     command: cmd,
                     cwd,
-                    rows: self.default_rows,
-                    cols: self.default_cols,
+                    rows,
+                    cols,
                 };
 
                 match ManagedPty::spawn(config) {
@@ -209,8 +209,6 @@ impl Chaperone {
                                     }
                                 });
 
-                                eprintln!("bzc: PTY socket ready at {}", socket_path_str);
-
                                 let response = protocol::encode(&ControlMessage::PtyAttached {
                                     pty_id,
                                     room_id,
@@ -232,7 +230,6 @@ impl Chaperone {
                 if let Some(handle) = self.ptys.remove(&pty_id) {
                     // Clean up socket file
                     let _ = std::fs::remove_file(&handle.socket_path);
-                    eprintln!("bzc: killed PTY {}", pty_id);
                 }
             }
             // These are outgoing messages, shouldn't receive them

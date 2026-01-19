@@ -33,11 +33,6 @@ fn main() -> Result<()> {
 
     let config = ChaperoneConfig::load(&config_path)?;
 
-    eprintln!(
-        "bzc: starting chaperone '{}' in {:?} mode",
-        config.name, config.mode
-    );
-
     let rt = tokio::runtime::Runtime::new()?;
 
     match config.mode {

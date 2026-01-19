@@ -335,7 +335,7 @@ async fn main() -> Result<()> {
 
         // Spawn PTY via chaperone
         let socket_path = user_chaperone
-            .spawn_pty(&room_id, ch_config.cwd.as_deref(), Some(&ch_config.command))
+            .spawn_pty(&room_id, ch_config.cwd.as_deref(), Some(&ch_config.command), pty_height, pty_cols)
             .await?;
 
         // Wait briefly for socket to be ready
@@ -575,6 +575,11 @@ async fn run(
     let mut event_stream = EventStream::new();
     let mut render_interval = tokio::time::interval(Duration::from_millis(16));
     let mut room_update_interval = tokio::time::interval(Duration::from_secs(5));
+
+    // Drain any buffered terminal events from before startup
+    while crossterm::event::poll(Duration::from_millis(0))? {
+        let _ = crossterm::event::read();
+    }
 
     // Initial room fetch
     app.update_matrix_rooms().await;
@@ -858,7 +863,7 @@ async fn run(
                                             });
 
                                         // Spawn PTY via chaperone
-                                        match user_chaperone.spawn_pty(&room_id, cwd.as_deref(), None).await {
+                                        match user_chaperone.spawn_pty(&room_id, cwd.as_deref(), None, pty_height, pty_cols).await {
                                             Ok(socket_path) => {
                                                 // Wait briefly for socket
                                                 tokio::time::sleep(Duration::from_millis(100)).await;

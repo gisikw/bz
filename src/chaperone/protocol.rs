@@ -16,6 +16,10 @@ pub enum ControlMessage {
         cwd: Option<String>,
         /// Command to run (optional, defaults to shell)
         command: Option<String>,
+        /// Terminal rows
+        rows: u16,
+        /// Terminal columns
+        cols: u16,
     },
     /// Kill a PTY
     KillPty {
