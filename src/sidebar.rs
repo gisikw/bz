@@ -140,7 +140,11 @@ impl Sidebar<'_> {
         channels: &'a [T],
         focused: usize,
     ) -> SessionSidebar<'a, T> {
-        SessionSidebar { channels, focused }
+        SessionSidebar {
+            channels,
+            focused,
+            rooms: Vec::new(),
+        }
     }
 }
 
@@ -148,11 +152,21 @@ impl Sidebar<'_> {
 pub struct SessionSidebar<'a, T: HasNameActivity + HasPtyStatus> {
     channels: &'a [T],
     focused: usize,
+    /// Matrix rooms to display (id, name)
+    rooms: Vec<(String, String)>,
+}
+
+impl<'a, T: HasNameActivity + HasPtyStatus> SessionSidebar<'a, T> {
+    /// Set Matrix rooms to display
+    pub fn with_rooms(mut self, rooms: Vec<(String, String)>) -> Self {
+        self.rooms = rooms;
+        self
+    }
 }
 
 impl<T: HasNameActivity + HasPtyStatus> Widget for SessionSidebar<'_, T> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let items: Vec<ListItem> = self
+        let mut items: Vec<ListItem> = self
             .channels
             .iter()
             .enumerate()
@@ -225,6 +239,23 @@ impl<T: HasNameActivity + HasPtyStatus> Widget for SessionSidebar<'_, T> {
                 ListItem::new(Line::from(spans)).style(style)
             })
             .collect();
+
+        // Add Matrix rooms section if any rooms provided
+        if !self.rooms.is_empty() {
+            // Separator
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled("─── Rooms ───", Style::default().fg(Color::DarkGray)),
+            ])));
+
+            for (_id, name) in &self.rooms {
+                let spans = vec![
+                    Span::raw("   "),
+                    Span::styled("◉ ", Style::default().fg(Color::Green)),
+                    Span::styled(name.as_str(), Style::default().fg(Color::DarkGray)),
+                ];
+                items.push(ListItem::new(Line::from(spans)));
+            }
+        }
 
         let version = concat!(" bz v", env!("CARGO_PKG_VERSION"), " ");
         let block = Block::default()

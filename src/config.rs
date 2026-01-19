@@ -11,6 +11,21 @@ use serde::Deserialize;
 pub struct Config {
     #[serde(default)]
     pub channel: Vec<ChannelConfig>,
+    #[serde(default)]
+    pub agent: Vec<AgentConfig>,
+}
+
+/// Configuration for an AI agent
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentConfig {
+    /// Agent name (used for Matrix username)
+    pub name: String,
+    /// Persona description (optional, for future use)
+    #[serde(default)]
+    pub persona: Option<String>,
+    /// Default rooms to join (optional)
+    #[serde(default)]
+    pub rooms: Vec<String>,
 }
 
 /// Configuration for a single channel
@@ -68,6 +83,7 @@ impl Config {
                 cwd: None,
                 command: default_command(),
             }],
+            agent: vec![],
         })
     }
 }

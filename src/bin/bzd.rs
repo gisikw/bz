@@ -11,6 +11,7 @@ use color_eyre::eyre::Result;
 // Import from bz crate
 use bz::config::Config;
 use bz::daemon::Daemon;
+use bz::daemon::conduit;
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -82,13 +83,26 @@ fn main() -> Result<()> {
         }
     }
 
+    // Spawn Conduit (must keep handle alive for process lifetime)
+    let _conduit = conduit::spawn_conduit()?;
+    eprintln!("Conduit started on port {}", conduit::CONDUIT_PORT);
+
     // Run daemon (in foreground or after daemonizing)
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         // Spawn PTYs inside the runtime
         daemon.spawn_ptys(&config)?;
+
+        // Spawn agent chaperones
+        if !config.agent.is_empty() {
+            eprintln!("bzd: spawning {} agent chaperone(s)", config.agent.len());
+            daemon.spawn_agents(&config)?;
+        }
+
         daemon.run().await
     })?;
+
+    // _conduit is dropped here, triggering graceful shutdown
 
     Ok(())
 }

@@ -2,6 +2,7 @@
 //!
 //! Manages PTY sessions that persist across bz restarts.
 
+pub mod conduit;
 pub mod pty_manager;
 
 use std::collections::hash_map::DefaultHasher;
@@ -15,12 +16,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Mutex};
 
-use crate::config::Config;
+use crate::config::{AgentConfig, Config};
 use crate::protocol::{
     encode, decode, ClientMessage, DaemonMessage, PtyConfig, SessionInfo,
 };
 
 use pty_manager::PtyManager;
+use std::process::{Child, Command};
 
 /// Session state directory
 /// Can be overridden with BZ_SESSION_DIR env var (useful for testing)
@@ -59,6 +61,18 @@ pub struct Daemon {
     socket_path: PathBuf,
     /// Last focused channel index
     focused: usize,
+    /// Agent chaperone processes
+    agent_processes: Vec<AgentProcess>,
+}
+
+/// Tracked agent chaperone process
+struct AgentProcess {
+    /// Agent name
+    name: String,
+    /// Child process handle
+    child: Child,
+    /// Config file path (for cleanup)
+    config_path: PathBuf,
 }
 
 struct ClientConnection {
@@ -86,6 +100,7 @@ impl Daemon {
             client: None,
             socket_path,
             focused: 0,
+            agent_processes: Vec::new(),
         })
     }
 
@@ -100,6 +115,68 @@ impl Daemon {
             self.pty_manager.spawn(&pty_config)?;
         }
         Ok(())
+    }
+
+    /// Spawn agent chaperone processes
+    pub fn spawn_agents(&mut self, config: &Config) -> Result<()> {
+        let agents_dir = session_dir().join("agents");
+        std::fs::create_dir_all(&agents_dir)?;
+
+        for agent in &config.agent {
+            match self.spawn_agent(&agents_dir, agent) {
+                Ok(()) => {
+                    eprintln!("bzd: spawned agent chaperone '{}'", agent.name);
+                }
+                Err(e) => {
+                    eprintln!("bzd: failed to spawn agent '{}': {}", agent.name, e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Spawn a single agent chaperone
+    fn spawn_agent(&mut self, agents_dir: &PathBuf, agent: &AgentConfig) -> Result<()> {
+        // Generate chaperone config file
+        let config_path = agents_dir.join(format!("{}.toml", agent.name));
+        let config_content = format!(
+            r#"name = "{}"
+mode = "matrix"
+"#,
+            agent.name
+        );
+        std::fs::write(&config_path, &config_content)?;
+
+        // Find bzc binary (same directory as bzd)
+        let bzc_path = std::env::current_exe()?
+            .parent()
+            .map(|p| p.join("bzc"))
+            .unwrap_or_else(|| PathBuf::from("bzc"));
+
+        // Spawn bzc process
+        let child = Command::new(&bzc_path)
+            .arg("--config")
+            .arg(&config_path)
+            .spawn()
+            .map_err(|e| color_eyre::eyre::eyre!("Failed to spawn bzc: {}", e))?;
+
+        self.agent_processes.push(AgentProcess {
+            name: agent.name.clone(),
+            child,
+            config_path,
+        });
+
+        Ok(())
+    }
+
+    /// Terminate all agent chaperone processes
+    pub fn terminate_agents(&mut self) {
+        for mut agent in self.agent_processes.drain(..) {
+            eprintln!("bzd: terminating agent '{}'", agent.name);
+            let _ = agent.child.kill();
+            let _ = agent.child.wait();
+            let _ = std::fs::remove_file(&agent.config_path);
+        }
     }
 
     /// Get the socket path

@@ -26,10 +26,16 @@ bincode = "1.3"
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
 
-# Config (Phase 4, but include now to avoid churn)
+# Config
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
 dirs = "5"
+tempfile = "3"
+chrono = "0.4"
+
+# Matrix client (rustls to avoid openssl, bundled-sqlite to avoid system sqlite)
+matrix-sdk = { version = "0.7", default-features = false, features = ["e2e-encryption", "bundled-sqlite", "rustls-tls"] }
 
 [dev-dependencies]
 portable-pty = "0.9"
@@ -42,6 +48,10 @@ path = "src/main.rs"
 [[bin]]
 name = "bzd"
 path = "src/bin/bzd.rs"
+
+[[bin]]
+name = "bzc"
+path = "src/bin/bzc.rs"
 
 [profile.release]
 strip = true
