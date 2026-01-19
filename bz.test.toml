@@ -28,3 +28,9 @@ command = "tmux new-session -A -s bz-dwim"
 name = "bz"
 cwd = "/home/dev/Projects/bz"
 command = "tmux new-session -A -s bz-bz"
+
+# Agent configuration
+[[agent]]
+name = "sam"
+cwd = "/home/dev/Projects/dwim"
+rooms = ["dwim"]

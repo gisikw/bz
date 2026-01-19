@@ -24,6 +24,9 @@ pub struct ChaperoneConfig {
     pub name: String,
     /// Operating mode
     pub mode: ChaperoneMode,
+    /// Working directory for agent (where wicket.yaml lives)
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 impl ChaperoneConfig {

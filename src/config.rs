@@ -43,6 +43,8 @@ fn default_server_name() -> String {
 pub struct AgentConfig {
     /// Agent name (used for Matrix username)
     pub name: String,
+    /// Working directory (where wicket.yaml lives)
+    pub cwd: Option<String>,
     /// Persona description (optional, for future use)
     #[serde(default)]
     pub persona: Option<String>,

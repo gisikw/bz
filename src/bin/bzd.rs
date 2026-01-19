@@ -16,11 +16,11 @@ use bz::daemon::conduit;
 fn main() -> Result<()> {
     color_eyre::install()?;
 
-    // Parse args: bzd <rows> <cols> [--foreground] [--server-name <name>]
+    // Parse args: bzd <rows> <cols> [--foreground] [--server-name <name>] [--config <path>]
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 3 {
-        eprintln!("Usage: bzd <rows> <cols> [--foreground] [--server-name <name>]");
+        eprintln!("Usage: bzd <rows> <cols> [--foreground] [--server-name <name>] [--config <path>]");
         std::process::exit(1);
     }
 
@@ -30,6 +30,7 @@ fn main() -> Result<()> {
     // Parse optional flags
     let mut foreground = false;
     let mut server_name = "localhost".to_string();
+    let mut config_path: Option<String> = None;
 
     let mut i = 3;
     while i < args.len() {
@@ -44,13 +45,26 @@ fn main() -> Result<()> {
             arg if arg.starts_with("--server-name=") => {
                 server_name = arg.trim_start_matches("--server-name=").to_string();
             }
+            "--config" => {
+                i += 1;
+                if i < args.len() {
+                    config_path = Some(args[i].clone());
+                }
+            }
+            arg if arg.starts_with("--config=") => {
+                config_path = Some(arg.trim_start_matches("--config=").to_string());
+            }
             _ => {}
         }
         i += 1;
     }
 
     // Load config
-    let config = Config::load()?;
+    let config = if let Some(path) = config_path {
+        Config::load_from(std::path::Path::new(&path))?
+    } else {
+        Config::load()?
+    };
 
     // Create daemon (doesn't spawn PTYs yet - needs tokio runtime)
     let mut daemon = Daemon::new(&config, rows, cols)?;

@@ -5,6 +5,7 @@
 //! In Matrix mode, it also connects to Matrix as an agent.
 
 use std::path::PathBuf;
+use std::process::Command;
 
 use color_eyre::eyre::{eyre, Result};
 use tokio::signal::unix::{signal, SignalKind};
@@ -166,7 +167,6 @@ fn main() -> Result<()> {
                                         // Check for @mentions
                                         // Match @agentname or @agentname:server patterns
                                         let mention_simple = format!("@{}", agent_name);
-                                        let mention_full = format!("@{}:", agent_name);
 
                                         let is_mentioned = content.contains(&mention_simple)
                                             || content.to_lowercase().contains(&mention_simple.to_lowercase());
@@ -175,11 +175,71 @@ fn main() -> Result<()> {
                                             eprintln!("bzc [{}]: @mentioned in {}: {}",
                                                 agent_name, msg.room_id, content);
 
-                                            // Trigger interrupt - acknowledge the mention
-                                            // Future: This is where we'd signal the PTY to interrupt
-                                            let ack = format!("👋 You mentioned me! (interrupt received)");
-                                            if let Err(e) = client.send_message(&msg.room_id, &ack).await {
-                                                eprintln!("bzc [{}]: failed to send mention ack: {}", agent_name, e);
+                                            // Extract the prompt (message without the @mention)
+                                            let prompt = content
+                                                .replace(&mention_simple, "")
+                                                .replace(&mention_simple.to_lowercase(), "")
+                                                .trim()
+                                                .to_string();
+
+                                            if prompt.is_empty() {
+                                                let ack = "👋 You mentioned me! What can I help with?";
+                                                if let Err(e) = client.send_message(&msg.room_id, ack).await {
+                                                    eprintln!("bzc [{}]: failed to send ack: {}", agent_name, e);
+                                                }
+                                            } else if let Some(ref cwd) = config.cwd {
+                                                // Invoke wicket with the prompt
+                                                eprintln!("bzc [{}]: invoking wicket in {} with prompt: {}",
+                                                    agent_name, cwd, prompt);
+
+                                                // Send "thinking" indicator
+                                                if let Err(e) = client.send_message(&msg.room_id, "🤔 Thinking...").await {
+                                                    eprintln!("bzc [{}]: failed to send thinking msg: {}", agent_name, e);
+                                                }
+
+                                                // Spawn wicket synchronously (blocking)
+                                                // -c = continue (maintain conversation context)
+                                                // -p = prompt (non-interactive)
+                                                let output = Command::new("wicket")
+                                                    .arg("-c")
+                                                    .arg("-p")
+                                                    .arg(&prompt)
+                                                    .current_dir(cwd)
+                                                    .output();
+
+                                                match output {
+                                                    Ok(out) => {
+                                                        let response = if out.status.success() {
+                                                            String::from_utf8_lossy(&out.stdout).to_string()
+                                                        } else {
+                                                            format!("Error: {}", String::from_utf8_lossy(&out.stderr))
+                                                        };
+
+                                                        // Truncate if too long
+                                                        let response = if response.len() > 4000 {
+                                                            format!("{}... (truncated)", &response[..4000])
+                                                        } else {
+                                                            response
+                                                        };
+
+                                                        if let Err(e) = client.send_message(&msg.room_id, &response).await {
+                                                            eprintln!("bzc [{}]: failed to send response: {}", agent_name, e);
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        let err_msg = format!("Failed to invoke wicket: {}", e);
+                                                        eprintln!("bzc [{}]: {}", agent_name, err_msg);
+                                                        if let Err(e) = client.send_message(&msg.room_id, &err_msg).await {
+                                                            eprintln!("bzc [{}]: failed to send error: {}", agent_name, e);
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                let err_msg = "No working directory configured - can't invoke wicket";
+                                                eprintln!("bzc [{}]: {}", agent_name, err_msg);
+                                                if let Err(e) = client.send_message(&msg.room_id, err_msg).await {
+                                                    eprintln!("bzc [{}]: failed to send error: {}", agent_name, e);
+                                                }
                                             }
                                         }
                                     }

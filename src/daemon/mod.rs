@@ -123,11 +123,15 @@ impl Daemon {
     fn spawn_agent(&mut self, agents_dir: &PathBuf, agent: &AgentConfig) -> Result<()> {
         // Generate chaperone config file
         let config_path = agents_dir.join(format!("{}.toml", agent.name));
+        let cwd_line = agent.cwd.as_ref()
+            .map(|c| format!("cwd = \"{}\"\n", c))
+            .unwrap_or_default();
         let config_content = format!(
             r#"name = "{}"
 mode = "matrix"
-"#,
-            agent.name
+{}"#,
+            agent.name,
+            cwd_line
         );
         std::fs::write(&config_path, &config_content)?;
 
@@ -143,6 +147,8 @@ mode = "matrix"
             .arg(&config_path)
             .spawn()
             .map_err(|e| color_eyre::eyre::eyre!("Failed to spawn bzc: {}", e))?;
+
+        eprintln!("bzd: spawned agent chaperone '{}'", agent.name);
 
         self.agent_processes.push(AgentProcess {
             name: agent.name.clone(),
@@ -363,10 +369,11 @@ async fn handle_connection(daemon: Arc<Mutex<Daemon>>, mut stream: UnixStream) -
                         break;
                     }
                     ClientMessage::Quit => {
-                        // Kill daemon
+                        // Kill daemon and all agent chaperones
                         let mut d = daemon.lock().await;
                         d.client = None;
-                        // Signal shutdown somehow - for now just exit process
+                        d.terminate_agents();
+                        // Exit process (PTYs and Conduit will be cleaned up by drop)
                         std::process::exit(0);
                     }
                     _ => {}

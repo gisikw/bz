@@ -348,13 +348,19 @@ async fn main() -> Result<()> {
         // Spawn bzd - it will daemonize and print socket path
         let bzd_path = find_bzd_binary();
         log(&format!("using bzd binary: {:?}", bzd_path));
+        let mut bzd_args = vec![
+            rows.to_string(),
+            cols.to_string(),
+            "--server-name".to_string(),
+            config.matrix.server_name.clone(),
+        ];
+        // Pass config path if we're using a custom one
+        if let Some(ref path) = config_path {
+            bzd_args.push("--config".to_string());
+            bzd_args.push(path.display().to_string());
+        }
         let output = Command::new(&bzd_path)
-            .args([
-                rows.to_string(),
-                cols.to_string(),
-                "--server-name".to_string(),
-                config.matrix.server_name.clone(),
-            ])
+            .args(&bzd_args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -429,8 +435,23 @@ async fn main() -> Result<()> {
             ).await {
                 Ok(Ok(mappings)) => {
                     log(&format!("got {} room mappings", mappings.len()));
-                    for (name, room_id) in mappings {
-                        channel_room_map.insert(name, room_id);
+                    for (name, room_id) in &mappings {
+                        channel_room_map.insert(name.clone(), room_id.clone());
+                    }
+
+                    // Invite agents to their configured rooms
+                    let server_name = &config.matrix.server_name;
+                    for agent in &config.agent {
+                        let agent_user_id = format!("@{}:{}", agent.name, server_name);
+                        for room_name in &agent.rooms {
+                            if let Some(room_id) = mappings.iter().find(|(n, _)| n == room_name).map(|(_, id)| id) {
+                                log(&format!("inviting {} to room {}", agent_user_id, room_name));
+                                if let Err(e) = client.invite_user(room_id, &agent_user_id).await {
+                                    // Don't fail if invite fails (agent might already be in room)
+                                    log(&format!("invite failed (may already be member): {}", e));
+                                }
+                            }
+                        }
                     }
                 }
                 Ok(Err(e)) => {
@@ -789,7 +810,10 @@ async fn run(
                         // Handle quit confirmation modal
                         if app.quit_confirm {
                             if key.code == KeyCode::Char('y') || key.code == KeyCode::Char('Y') {
-                                // Confirmed quit - kill all PTYs
+                                // Confirmed quit - kill daemon and all agents
+                                if let Some(socket_path) = daemon::find_session() {
+                                    let _ = daemon::stop_session(&socket_path);
+                                }
                                 break;
                             } else {
                                 // Cancel

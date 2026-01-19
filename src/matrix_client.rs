@@ -314,10 +314,11 @@ impl BzMatrixClient {
             }
         }
 
-        // Try registration
+        // Try registration with dummy auth (Conduit requires UIAA)
         let mut request = RegistrationRequest::new();
         request.username = Some(agent_name.to_string());
         request.password = Some(password.to_string());
+        request.auth = Some(AuthData::Dummy(Dummy::new()));
 
         let response = client
             .matrix_auth()
@@ -554,6 +555,23 @@ impl BzMatrixClient {
         }
 
         Ok(mappings)
+    }
+
+    /// Invite a user to a room
+    pub async fn invite_user(&self, room_id: &str, user_id: &str) -> Result<()> {
+        let room_id: OwnedRoomId = room_id.parse().wrap_err("Invalid room ID")?;
+        let user_id: matrix_sdk::ruma::OwnedUserId = user_id.parse().wrap_err("Invalid user ID")?;
+
+        let room = self
+            .client
+            .get_room(&room_id)
+            .ok_or_else(|| eyre!("Room not found: {}", room_id))?;
+
+        room.invite_user_by_id(&user_id)
+            .await
+            .wrap_err_with(|| format!("Failed to invite {} to room {}", user_id, room_id))?;
+
+        Ok(())
     }
 
     /// Update attached PTYs state in a room
