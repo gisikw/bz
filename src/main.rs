@@ -148,13 +148,6 @@ impl App {
         }
     }
 
-    /// Check pending activities
-    fn check_pending_activities(&mut self) {
-        for room in &mut self.rooms {
-            room.check_pending_activities();
-        }
-    }
-
     /// Resize all PTYs in all rooms
     fn resize_all(&mut self, rows: u16, cols: u16) {
         let pty_rows = rows.max(24);
@@ -674,10 +667,27 @@ fn render_room_sidebar(
     use ratatui::text::{Line, Span};
     use ratatui::widgets::{Block, Borders, List, ListItem};
 
-    let items: Vec<ListItem> = rooms
-        .iter()
-        .enumerate()
-        .map(|(i, room)| {
+    // Divider after title
+    let divider = ListItem::new(Line::from(vec![
+        Span::styled(
+            " ───────────────────",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+
+    // Section header
+    let header = ListItem::new(Line::from(vec![
+        Span::styled(
+            " Channels",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    let mut items: Vec<ListItem> = vec![divider, header];
+
+    items.extend(rooms.iter().enumerate().map(|(i, room)| {
             let is_focused = i == focused;
             let activity = room.activity();
 
@@ -719,29 +729,18 @@ fn render_room_sidebar(
 
             // Activity indicator
             use crate::pty::ActivityState;
-            match activity {
-                ActivityState::Idle | ActivityState::Pending { .. } => {}
-                ActivityState::Active(0) => {
-                    spans.push(Span::styled(
-                        " \u{25CF}".to_string(), // ●
-                        Style::default().fg(Color::Yellow),
-                    ));
-                }
-                ActivityState::Active(n) => {
-                    spans.push(Span::styled(
-                        format!(" \u{25C6} {}", n), // ◆
-                        Style::default()
-                            .fg(Color::Red)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                }
+            if activity == ActivityState::Active {
+                spans.push(Span::styled(
+                    " \u{25CF}".to_string(), // ●
+                    Style::default().fg(Color::Yellow),
+                ));
             }
 
             let style = if is_focused {
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD)
-            } else if matches!(activity, ActivityState::Active(_)) {
+            } else if activity == ActivityState::Active {
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD)
@@ -750,8 +749,7 @@ fn render_room_sidebar(
             };
 
             ListItem::new(Line::from(spans)).style(style)
-        })
-        .collect();
+        }));
 
     let version = concat!(" bz v", env!("CARGO_PKG_VERSION"), " ");
     let block = Block::default()
@@ -1150,8 +1148,6 @@ async fn run(
 
             // Render at regular intervals
             _ = render_interval.tick() => {
-                app.check_pending_activities();
-
                 terminal.draw(|frame| {
                     let main_area = if app.show_sidebar {
                         let h_chunks = Layout::default()
