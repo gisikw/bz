@@ -35,7 +35,7 @@ impl Screen {
         match self {
             Screen::Chat(state) => {
                 if state.has_unread {
-                    ActivityState::Active(1)
+                    ActivityState::Active
                 } else {
                     ActivityState::Idle
                 }
@@ -211,28 +211,13 @@ impl RoomView {
 
     /// Get aggregate activity for this room (for sidebar)
     pub fn activity(&self) -> ActivityState {
-        // Return the "most urgent" activity across all screens
-        let mut max_bells = 0;
-        let mut has_activity = false;
-
+        // Return Active if any screen has activity
         for screen in &self.screens {
-            match screen.activity() {
-                ActivityState::Active(bells) => {
-                    has_activity = true;
-                    max_bells = max_bells.max(bells);
-                }
-                ActivityState::Pending { .. } => {
-                    // Pending doesn't show yet
-                }
-                ActivityState::Idle => {}
+            if screen.activity() == ActivityState::Active {
+                return ActivityState::Active;
             }
         }
-
-        if has_activity {
-            ActivityState::Active(max_bells)
-        } else {
-            ActivityState::Idle
-        }
+        ActivityState::Idle
     }
 
     /// Process pending output for all PTYs
@@ -241,15 +226,6 @@ impl RoomView {
             if let Screen::Pty(channel) = screen {
                 let is_focused_screen = is_focused_room && i == self.current_screen;
                 channel.process_pending(is_focused_screen);
-            }
-        }
-    }
-
-    /// Check pending activities for all PTYs
-    pub fn check_pending_activities(&mut self) {
-        for screen in &mut self.screens {
-            if let Screen::Pty(channel) = screen {
-                channel.check_pending_activity();
             }
         }
     }

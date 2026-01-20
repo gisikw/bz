@@ -24,7 +24,6 @@ const ICON_SEARCH: &str = ">";
 const ICON_CHANNEL: &str = "#";
 const ICON_SELECTED: &str = "▸";
 const ICON_ACTIVITY: &str = "●";
-const ICON_BELL: &str = "◆";
 
 /// Room picker state
 pub struct Picker {
@@ -71,30 +70,12 @@ impl Picker {
             self.filtered = rooms
                 .iter()
                 .enumerate()
-                .filter(|(_, room)| matches!(room.activity(), ActivityState::Active(_)))
-                .collect::<Vec<_>>()
-                .into_iter()
+                .filter(|(_, room)| room.activity() == ActivityState::Active)
                 .map(|(i, _)| i)
                 .collect();
 
-            self.filtered.sort_by(|&a, &b| {
-                let a_room = &rooms[a];
-                let b_room = &rooms[b];
-
-                let a_bells = match a_room.activity() {
-                    ActivityState::Active(n) if n > 0 => n,
-                    _ => 0,
-                };
-                let b_bells = match b_room.activity() {
-                    ActivityState::Active(n) if n > 0 => n,
-                    _ => 0,
-                };
-
-                match b_bells.cmp(&a_bells) {
-                    std::cmp::Ordering::Equal => a_room.name.cmp(&b_room.name),
-                    other => other,
-                }
-            });
+            // Sort by name
+            self.filtered.sort_by(|&a, &b| rooms[a].name.cmp(&rooms[b].name));
         } else {
             let query_lower = self.query.to_lowercase();
             self.filtered = rooms
@@ -216,10 +197,10 @@ impl<'a> Widget for RoomPickerWidget<'a> {
                         "   ".to_string()
                     };
 
-                    let activity_indicator = match room.activity() {
-                        ActivityState::Active(0) => format!(" {}", ICON_ACTIVITY),
-                        ActivityState::Active(n) => format!(" {} {}", ICON_BELL, n),
-                        _ => String::new(),
+                    let activity_indicator = if room.activity() == ActivityState::Active {
+                        format!(" {}", ICON_ACTIVITY)
+                    } else {
+                        String::new()
                     };
 
                     let text = format!("{}{}{}{}", prefix, ICON_CHANNEL, room.name, activity_indicator);

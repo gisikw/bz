@@ -2,10 +2,7 @@
 //!
 //! A channel that manages a PTY through the chaperone.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 
 use color_eyre::eyre::Result;
 use vt100::Parser;
@@ -15,21 +12,8 @@ use crate::picker::{HasNameActivity, HasPtyStatus};
 use crate::protocol::{ClientMessage, DaemonMessage};
 use crate::pty::{ActivityState, PtyStatus};
 
-/// How long to wait for screen to settle before confirming activity
-const ACTIVITY_SETTLE_TIME: Duration = Duration::from_millis(500);
-
-/// How long to ignore activity after resize
-const RESIZE_COOLDOWN: Duration = Duration::from_millis(2000);
-
 /// Number of lines to keep in scrollback buffer
 const SCROLLBACK_LINES: usize = 10000;
-
-/// Hash the screen contents for comparison
-fn hash_screen(screen: &vt100::Screen) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    screen.contents().hash(&mut hasher);
-    hasher.finish()
-}
 
 /// A channel backed by a chaperone PTY
 pub struct ChaperoneChannel {
@@ -58,8 +42,6 @@ pub struct ChaperoneChannel {
     pub scroll_offset: usize,
     /// Process status
     status: PtyStatus,
-    /// Resize cooldown
-    resize_cooldown_until: Option<Instant>,
     /// Whether history has been fully received
     history_complete: bool,
 }
@@ -90,7 +72,6 @@ impl ChaperoneChannel {
             activity: ActivityState::default(),
             scroll_offset: 0,
             status: PtyStatus::Running,
-            resize_cooldown_until: None,
             history_complete: false,
         })
     }
@@ -121,7 +102,6 @@ impl ChaperoneChannel {
             activity: ActivityState::default(),
             scroll_offset: 0,
             status: PtyStatus::Running,
-            resize_cooldown_until: None,
             history_complete: false,
         }
     }
@@ -216,71 +196,9 @@ impl ChaperoneChannel {
     }
 
     /// Process output data
-    fn process_output(&mut self, data: &[u8], is_focused: bool) {
-        if data.is_empty() {
-            return;
-        }
-
-        // Check if we're in resize cooldown
-        let in_cooldown = self
-            .resize_cooldown_until
-            .map(|until| Instant::now() < until)
-            .unwrap_or(false);
-
-        // Capture snapshot before processing if Idle and unfocused
-        let pre_snapshot = if !is_focused && !in_cooldown && self.activity == ActivityState::Idle {
-            Some(hash_screen(self.parser.screen()))
-        } else {
-            None
-        };
-
-        // Count bells
-        let bells = if !is_focused && !in_cooldown {
-            data.iter().filter(|&&b| b == 0x07).count() as u32
-        } else {
-            0
-        };
-
-        // Process through parser
-        self.parser.process(data);
-
-        // Update activity state
-        if !is_focused && !in_cooldown {
-            match &mut self.activity {
-                ActivityState::Idle => {
-                    self.activity = ActivityState::Pending {
-                        since: Instant::now(),
-                        snapshot: pre_snapshot
-                            .unwrap_or_else(|| hash_screen(self.parser.screen())),
-                        bells,
-                    };
-                }
-                ActivityState::Pending { bells: b, .. } => {
-                    *b += bells;
-                }
-                ActivityState::Active(count) => {
-                    *count += bells;
-                }
-            }
-        }
-    }
-
-    /// Check pending activity and promote to Active if settled
-    pub fn check_pending_activity(&mut self) {
-        if let ActivityState::Pending {
-            since,
-            snapshot,
-            bells,
-        } = self.activity
-        {
-            if since.elapsed() >= ACTIVITY_SETTLE_TIME {
-                let current_hash = hash_screen(self.parser.screen());
-                if current_hash != snapshot {
-                    self.activity = ActivityState::Active(bells);
-                } else {
-                    self.activity = ActivityState::Idle;
-                }
-            }
+    fn process_output(&mut self, data: &[u8], _is_focused: bool) {
+        if !data.is_empty() {
+            self.parser.process(data);
         }
     }
 
@@ -297,12 +215,6 @@ impl ChaperoneChannel {
 
         // Update parser size
         self.parser.screen_mut().set_size(rows, cols);
-
-        // Set cooldown
-        if let ActivityState::Pending { .. } = self.activity {
-            self.activity = ActivityState::Idle;
-        }
-        self.resize_cooldown_until = Some(Instant::now() + RESIZE_COOLDOWN);
 
         // Send resize to PTY if connected
         self.send_resize(rows, cols);

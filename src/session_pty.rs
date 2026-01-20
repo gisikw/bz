@@ -3,31 +3,14 @@
 //! A PTY implementation that communicates through the session daemon
 //! instead of directly managing a PTY.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::time::{Duration, Instant};
-
 use tokio::sync::mpsc;
 use vt100::Parser;
 
 use crate::protocol::ClientMessage;
 use crate::pty::{ActivityState, PtyStatus};
 
-/// How long to wait for screen to settle before confirming activity
-const ACTIVITY_SETTLE_TIME: Duration = Duration::from_millis(500);
-
-/// How long to ignore activity after resize
-const RESIZE_COOLDOWN: Duration = Duration::from_millis(2000);
-
 /// Number of lines to keep in scrollback buffer
 const SCROLLBACK_LINES: usize = 10000;
-
-/// Hash the screen contents for comparison
-fn hash_screen(screen: &vt100::Screen) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    screen.contents().hash(&mut hasher);
-    hasher.finish()
-}
 
 /// A PTY backed by the session daemon
 pub struct SessionPty {
@@ -41,8 +24,6 @@ pub struct SessionPty {
     pub scroll_offset: usize,
     /// Process status
     pub status: PtyStatus,
-    /// Resize cooldown
-    resize_cooldown_until: Option<Instant>,
     /// Channel to send messages to session
     session_tx: mpsc::Sender<ClientMessage>,
     /// Whether history has been fully received
@@ -58,7 +39,6 @@ impl SessionPty {
             activity: ActivityState::default(),
             scroll_offset: 0,
             status: PtyStatus::Running,
-            resize_cooldown_until: None,
             session_tx,
             history_complete: false,
         }
@@ -67,53 +47,11 @@ impl SessionPty {
     /// Process output from daemon
     ///
     /// Returns true if any data was processed.
-    pub fn process_daemon_output(&mut self, data: &[u8], is_focused: bool) -> bool {
+    pub fn process_daemon_output(&mut self, data: &[u8], _is_focused: bool) -> bool {
         if data.is_empty() {
             return false;
         }
-
-        // Check if we're in resize cooldown
-        let in_cooldown = self
-            .resize_cooldown_until
-            .map(|until| Instant::now() < until)
-            .unwrap_or(false);
-
-        // Capture snapshot before processing if Idle and unfocused
-        let pre_snapshot = if !is_focused && !in_cooldown && self.activity == ActivityState::Idle {
-            Some(hash_screen(self.parser.screen()))
-        } else {
-            None
-        };
-
-        // Count bells
-        let bells = if !is_focused && !in_cooldown {
-            data.iter().filter(|&&b| b == 0x07).count() as u32
-        } else {
-            0
-        };
-
-        // Process through parser
         self.parser.process(data);
-
-        // Update activity state
-        if !is_focused && !in_cooldown {
-            match &mut self.activity {
-                ActivityState::Idle => {
-                    self.activity = ActivityState::Pending {
-                        since: Instant::now(),
-                        snapshot: pre_snapshot.unwrap_or_else(|| hash_screen(self.parser.screen())),
-                        bells,
-                    };
-                }
-                ActivityState::Pending { bells: b, .. } => {
-                    *b += bells;
-                }
-                ActivityState::Active(count) => {
-                    *count += bells;
-                }
-            }
-        }
-
         true
     }
 
@@ -137,12 +75,6 @@ impl SessionPty {
         // Update parser size
         self.parser.screen_mut().set_size(rows, cols);
 
-        // Set cooldown
-        if let ActivityState::Pending { .. } = self.activity {
-            self.activity = ActivityState::Idle;
-        }
-        self.resize_cooldown_until = Some(Instant::now() + RESIZE_COOLDOWN);
-
         // Send resize to daemon
         let msg = ClientMessage::Resize {
             pty_id: self.id,
@@ -159,25 +91,6 @@ impl SessionPty {
             data: data.to_vec(),
         };
         let _ = self.session_tx.try_send(msg);
-    }
-
-    /// Check pending activity and promote to Active if settled
-    pub fn check_pending_activity(&mut self) {
-        if let ActivityState::Pending {
-            since,
-            snapshot,
-            bells,
-        } = self.activity
-        {
-            if since.elapsed() >= ACTIVITY_SETTLE_TIME {
-                let current_hash = hash_screen(self.parser.screen());
-                if current_hash != snapshot {
-                    self.activity = ActivityState::Active(bells);
-                } else {
-                    self.activity = ActivityState::Idle;
-                }
-            }
-        }
     }
 
     /// Clear activity state
