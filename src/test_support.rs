@@ -253,11 +253,11 @@ impl PtyDriver {
         }
     }
 
-    /// Graceful quit: send Ctrl+B q y (leader mode quit with confirmation)
+    /// Graceful quit: send Ctrl+B Q y (leader mode quit with confirmation)
     pub fn quit(&mut self) -> io::Result<()> {
         self.send(r"\x02")?; // Ctrl+B enters leader mode
         std::thread::sleep(Duration::from_millis(100));
-        self.send("q")?; // q shows quit confirmation
+        self.send("Q")?; // Q shows quit confirmation (uppercase)
         std::thread::sleep(Duration::from_millis(100));
         self.send("y")?; // y confirms quit
         Ok(())

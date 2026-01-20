@@ -1,0 +1,8 @@
+# Test fixture config with a pty-only agent for process cleanup testing
+
+[[channel]]
+name = "main"
+
+[[agent]]
+name = "test-agent"
+mode = "pty-only"

@@ -45,12 +45,19 @@ pub struct AgentConfig {
     pub name: String,
     /// Working directory (where wicket.yaml lives)
     pub cwd: Option<String>,
+    /// Chaperone mode: "matrix" (default) or "pty-only"
+    #[serde(default = "default_agent_mode")]
+    pub mode: String,
     /// Persona description (optional, for future use)
     #[serde(default)]
     pub persona: Option<String>,
     /// Default rooms to join (optional)
     #[serde(default)]
     pub rooms: Vec<String>,
+}
+
+fn default_agent_mode() -> String {
+    "matrix".to_string()
 }
 
 /// Configuration for a single channel

@@ -21,7 +21,7 @@ fn test_bz_spawns_shell_and_renders() -> Result<()> {
     let mut driver = PtyDriver::spawn_isolated(24, 120)?;
 
     // Wait for shell to start and render (daemon + chaperone + Matrix login)
-    driver.wait_and_process(2000);
+    driver.wait_and_process(4000);
 
     let screen = driver.screen();
     println!("Screen contents: {:?}", screen.trim());
@@ -50,7 +50,7 @@ fn test_input_forwarding() -> Result<()> {
     let mut driver = PtyDriver::spawn_isolated(24, 120)?;
 
     // Wait for shell to start (daemon + chaperone init takes time)
-    driver.wait_and_process(2000);
+    driver.wait_and_process(4000);
 
     // Send "echo test123" followed by Enter
     driver.send("echo test123\r")?;
@@ -83,7 +83,7 @@ fn test_tab_switching() -> Result<()> {
     let mut driver = PtyDriver::spawn_in_dir(24, 120, &fixtures_dir())?;
 
     // Wait for initial render (daemon + chaperone init takes time)
-    driver.wait_and_process(2000);
+    driver.wait_and_process(4000);
 
     let screen = driver.screen();
     println!("Initial screen: {:?}", screen);
@@ -154,7 +154,7 @@ fn test_activity_detection() -> Result<()> {
     let mut driver = PtyDriver::spawn_in_dir(24, 120, &fixtures_dir())?;
 
     // Wait for initial render (daemon + chaperone init takes time)
-    driver.wait_and_process(2000);
+    driver.wait_and_process(4000);
 
     let screen = driver.screen();
     println!("Initial screen: {:?}", screen);
@@ -213,7 +213,7 @@ fn test_sidebar_hides_on_mobile() -> Result<()> {
     let mut driver = PtyDriver::spawn_isolated(24, 80)?;
 
     // Wait for bz to render (daemon + chaperone init takes time)
-    driver.wait_and_process(2000);
+    driver.wait_and_process(4000);
 
     let screen = driver.screen();
     println!("Mobile screen: {:?}", screen);
@@ -233,6 +233,111 @@ fn test_sidebar_hides_on_mobile() -> Result<()> {
     // Quit gracefully
     driver.quit()?;
     driver.wait_for_exit(2000)?;
+
+    Ok(())
+}
+
+/// Path to test fixtures with agent directory
+fn fixtures_with_agent_dir() -> String {
+    format!("{}/tests/fixtures_with_agent", env!("CARGO_MANIFEST_DIR"))
+}
+
+/// Test: Quit (Ctrl+B Q y) kills daemon and agent chaperone processes
+///
+/// This verifies that when the user confirms quit, all child processes
+/// (bzd daemon and bzc agent chaperones) are properly terminated.
+#[test]
+fn test_quit_kills_daemon_and_chaperones() -> Result<()> {
+    let mut driver = PtyDriver::spawn_in_dir(24, 120, &fixtures_with_agent_dir())?;
+    let session_dir = driver.session_dir().unwrap().to_string();
+
+    // Wait for bz to fully start (daemon + chaperones + matrix login)
+    driver.wait_and_process(4000);
+
+    // Verify bz is running
+    assert!(driver.is_running(), "bz should be running");
+
+    // Find daemon PID
+    let daemon_pid: i32 = std::fs::read_dir(&session_dir)
+        .ok()
+        .and_then(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .find(|e| e.path().extension().map(|x| x == "pid").unwrap_or(false))
+                .and_then(|e| std::fs::read_to_string(e.path()).ok())
+        })
+        .and_then(|s| s.trim().parse().ok())
+        .expect("Daemon PID file should exist");
+
+    // Find agent PID (in agents subdirectory)
+    let agents_dir = format!("{}/agents", session_dir);
+    let agent_pid: Option<i32> = std::fs::read_dir(&agents_dir)
+        .ok()
+        .and_then(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .find(|e| e.path().extension().map(|x| x == "pid").unwrap_or(false))
+                .and_then(|e| std::fs::read_to_string(e.path()).ok())
+        })
+        .and_then(|s| s.trim().parse().ok());
+
+    // Verify daemon is running
+    assert!(
+        unsafe { libc::kill(daemon_pid, 0) } == 0,
+        "Daemon (pid {}) should be running before quit",
+        daemon_pid
+    );
+
+    // Verify agent is running (if spawned)
+    if let Some(pid) = agent_pid {
+        assert!(
+            unsafe { libc::kill(pid, 0) } == 0,
+            "Agent chaperone (pid {}) should be running before quit",
+            pid
+        );
+    }
+
+    // Send Ctrl+B Q y to quit with confirmation
+    driver.send(r"\x02")?; // Ctrl+B
+    driver.wait_and_process(100);
+    driver.send("Q")?; // Uppercase Q for destructive quit
+    driver.wait_and_process(100);
+
+    // Verify quit confirmation is shown
+    let screen = driver.screen();
+    assert!(
+        screen.contains("kill all PTYs") || screen.contains("Quit Session"),
+        "Should show quit confirmation dialog, got: {}",
+        screen
+    );
+
+    // Confirm quit
+    driver.send("y")?;
+
+    // Wait for bz to exit
+    assert!(
+        driver.wait_for_exit(5000)?,
+        "bz should exit after quit confirmation"
+    );
+
+    // Give processes time to clean up
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Verify daemon is no longer running
+    assert!(
+        unsafe { libc::kill(daemon_pid, 0) } != 0,
+        "Daemon (pid {}) should be killed after quit",
+        daemon_pid
+    );
+
+    // Verify agent is no longer running (if it was spawned)
+    if let Some(pid) = agent_pid {
+        assert!(
+            unsafe { libc::kill(pid, 0) } != 0,
+            "Agent chaperone (pid {}) should be killed after quit",
+            pid
+        );
+    }
 
     Ok(())
 }

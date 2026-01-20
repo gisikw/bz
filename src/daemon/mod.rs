@@ -62,6 +62,8 @@ struct AgentProcess {
     child: Child,
     /// Config file path (for cleanup)
     config_path: PathBuf,
+    /// PID file path (for cleanup)
+    pid_path: PathBuf,
 }
 
 struct ClientConnection {
@@ -128,9 +130,10 @@ impl Daemon {
             .unwrap_or_default();
         let config_content = format!(
             r#"name = "{}"
-mode = "matrix"
+mode = "{}"
 {}"#,
             agent.name,
+            agent.mode,
             cwd_line
         );
         std::fs::write(&config_path, &config_content)?;
@@ -148,12 +151,17 @@ mode = "matrix"
             .spawn()
             .map_err(|e| color_eyre::eyre::eyre!("Failed to spawn bzc: {}", e))?;
 
-        eprintln!("bzd: spawned agent chaperone '{}'", agent.name);
+        // Write PID file for the agent
+        let pid_path = agents_dir.join(format!("{}.pid", agent.name));
+        std::fs::write(&pid_path, child.id().to_string())?;
+
+        eprintln!("bzd: spawned agent chaperone '{}' (pid {})", agent.name, child.id());
 
         self.agent_processes.push(AgentProcess {
             name: agent.name.clone(),
             child,
             config_path,
+            pid_path,
         });
 
         Ok(())
@@ -165,6 +173,7 @@ mode = "matrix"
             let _ = agent.child.kill();
             let _ = agent.child.wait();
             let _ = std::fs::remove_file(&agent.config_path);
+            let _ = std::fs::remove_file(&agent.pid_path);
         }
     }
 
@@ -263,6 +272,16 @@ async fn handle_connection(daemon: Arc<Mutex<Daemon>>, mut stream: UnixStream) -
     let (tx, mut rx) = mpsc::channel::<DaemonMessage>(256);
 
     match msg {
+        ClientMessage::Quit => {
+            // Quit can be sent without attaching - it's a control command
+            let mut d = daemon.lock().await;
+            if let Some(client) = d.client.take() {
+                // Notify existing client
+                let _ = client.tx.send(DaemonMessage::Shutdown).await;
+            }
+            d.terminate_agents();
+            std::process::exit(0);
+        }
         ClientMessage::Attach => {
             let mut d = daemon.lock().await;
             if d.client.is_some() {
