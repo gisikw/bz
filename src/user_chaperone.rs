@@ -33,13 +33,17 @@ impl UserChaperone {
         // Find bzc binary - check target/debug first for development
         let bzc_path = find_bzc_binary()?;
 
+        // Clean up stale control socket from previous crashed session.
+        // This prevents a race where wait_ready() finds the stale socket
+        // before the new bzc process can remove it.
+        let control_socket_path = control_socket_path();
+        let _ = std::fs::remove_file(&control_socket_path);
+
         let child = Command::new(&bzc_path)
             .arg("--config")
             .arg(config_file.path())
             .spawn()
             .wrap_err_with(|| format!("Failed to spawn bzc from {}", bzc_path.display()))?;
-
-        let control_socket_path = control_socket_path();
 
         Ok(Self {
             child,

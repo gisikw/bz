@@ -6,7 +6,7 @@
 //! Tests use isolated session directories to avoid conflicts with
 //! other test runs or the user's production bz instance.
 
-use bz::test_support::PtyDriver;
+use bz::test_support::{unique_session_dir, PtyDriver};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -338,6 +338,84 @@ fn test_quit_kills_daemon_and_chaperones() -> Result<()> {
             pid
         );
     }
+
+    Ok(())
+}
+
+/// Test: bz starts successfully despite stale sockets from crashed session
+///
+/// When SSH drops or bz crashes, stale Unix sockets can be left behind.
+/// This test verifies that bz cleans up stale sockets on startup and
+/// successfully reconnects.
+#[test]
+fn test_reconnect_cleans_stale_sockets() -> Result<()> {
+    // Create isolated session directory
+    let session_dir = unique_session_dir();
+    let data_dir = format!("{}/data", session_dir);
+    let chaperone_dir = format!("{}/chaperones/user", data_dir);
+
+    // Create directory structure
+    std::fs::create_dir_all(&chaperone_dir)?;
+
+    // Create stale sockets (simulating crashed session)
+    let stale_control = format!("{}/control.sock", chaperone_dir);
+    let stale_pty1 = format!("{}/fake-pty-1.sock", chaperone_dir);
+    let stale_pty2 = format!("{}/fake-pty-2.sock", chaperone_dir);
+
+    std::fs::write(&stale_control, "stale")?;
+    std::fs::write(&stale_pty1, "stale")?;
+    std::fs::write(&stale_pty2, "stale")?;
+
+    // Verify stale sockets exist
+    assert!(
+        std::path::Path::new(&stale_control).exists(),
+        "Stale control.sock should exist before test"
+    );
+    assert!(
+        std::path::Path::new(&stale_pty1).exists(),
+        "Stale PTY socket should exist before test"
+    );
+
+    // Spawn bz with the pre-setup session directory
+    let mut driver = PtyDriver::spawn_with_session_dir(24, 120, session_dir)?;
+
+    // Wait for bz to start (this is where socket cleanup happens)
+    driver.wait_and_process(4000);
+
+    // Verify bz is running (meaning it successfully started despite stale sockets)
+    assert!(
+        driver.is_running(),
+        "bz should start successfully despite stale sockets"
+    );
+
+    // Verify stale PTY sockets were cleaned up
+    assert!(
+        !std::path::Path::new(&stale_pty1).exists(),
+        "Stale PTY socket should be cleaned up on startup"
+    );
+    assert!(
+        !std::path::Path::new(&stale_pty2).exists(),
+        "Stale PTY socket should be cleaned up on startup"
+    );
+
+    // The control.sock should now be a real socket (not our fake file)
+    // We can verify this by checking the file type
+    let metadata = std::fs::metadata(&stale_control);
+    if let Ok(meta) = metadata {
+        // On Unix, socket files have a special file type
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            assert!(
+                meta.file_type().is_socket(),
+                "control.sock should be a real socket, not a regular file"
+            );
+        }
+    }
+
+    // Quit gracefully
+    driver.quit()?;
+    driver.wait_for_exit(5000)?;
 
     Ok(())
 }

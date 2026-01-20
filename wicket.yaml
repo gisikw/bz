@@ -39,6 +39,54 @@ prompt: |
   send y
   ```
 
+  ### Integration Tests (Capybara-style)
+
+  For automated testing, use the `PtyDriver` from `bz::test_support`. This provides
+  a high-level API for spawning bz in a PTY, sending input, and asserting on screen state.
+
+  ```rust
+  use bz::test_support::{PtyDriver, unique_session_dir};
+
+  #[test]
+  fn test_something() -> Result<()> {
+      // Spawns bz in isolated environment (unique session/data dirs)
+      let mut driver = PtyDriver::spawn_isolated(24, 120)?;
+      driver.wait_and_process(4000);  // Wait for startup
+
+      // Send keystrokes
+      driver.send(r"\x02n")?;  // Ctrl+B n
+      driver.wait_and_process(200);
+
+      // Assert on screen contents
+      assert!(driver.screen().contains("#build"));
+
+      // Clean exit
+      driver.quit()?;
+      driver.wait_for_exit(5000)?;
+      Ok(())
+  }
+  ```
+
+  Key methods:
+  - `spawn_isolated(rows, cols)` - Spawn with unique isolated dirs
+  - `spawn_in_dir(rows, cols, cwd)` - Spawn in specific working directory
+  - `spawn_with_session_dir(rows, cols, dir)` - Spawn with pre-setup session dir
+  - `wait_and_process(ms)` - Wait and process PTY output
+  - `send(text)` - Send text (supports `\x02`, `\n`, etc.)
+  - `screen()` - Get current screen contents as string
+  - `quit()` / `wait_for_exit(ms)` - Graceful shutdown
+
+  For tests needing pre-setup state (e.g., stale sockets):
+  ```rust
+  let session_dir = unique_session_dir();
+  let data_dir = format!("{}/data", session_dir);
+  std::fs::create_dir_all(&data_dir)?;
+  // ... create test fixtures ...
+  let mut driver = PtyDriver::spawn_with_session_dir(24, 120, session_dir)?;
+  ```
+
+  Tests live in `tests/integration.rs`. Run with `cargo test --test integration`.
+
   ### Environment Variables
 
   For test isolation (avoid conflicts with production bz):

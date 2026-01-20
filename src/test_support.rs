@@ -69,6 +69,14 @@ impl PtyDriver {
         Self::spawn_with_config(rows, cols, Some(session_dir), Some(cwd.to_string()))
     }
 
+    /// Spawn bz with an existing session directory (for pre-setup tests)
+    ///
+    /// Use this when you need to create state (e.g., stale sockets) before spawning.
+    /// The data_dir will be `{session_dir}/data`.
+    pub fn spawn_with_session_dir(rows: u16, cols: u16, session_dir: String) -> io::Result<Self> {
+        Self::spawn_with_config(rows, cols, Some(session_dir), None)
+    }
+
     fn spawn_with_config(
         rows: u16,
         cols: u16,

@@ -85,10 +85,18 @@ impl Chaperone {
         if let Some(parent) = socket_path.parent() {
             std::fs::create_dir_all(parent)
                 .wrap_err_with(|| format!("Failed to create directory: {}", parent.display()))?;
-        }
 
-        // Remove stale socket if exists
-        let _ = std::fs::remove_file(&socket_path);
+            // Clean up stale PTY sockets from previous crashed sessions.
+            // These are UUID-named .sock files left behind when chaperone dies abruptly.
+            if let Ok(entries) = std::fs::read_dir(parent) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map_or(false, |ext| ext == "sock") {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
 
         let listener = UnixListener::bind(&socket_path)
             .wrap_err_with(|| format!("Failed to bind control socket: {}", socket_path.display()))?;
