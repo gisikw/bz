@@ -40,6 +40,14 @@ struct PtyHandle {
     pty: Arc<Mutex<ManagedPty>>,
     /// Socket path for cleanup
     socket_path: PathBuf,
+    /// Room ID for detach notification
+    room_id: String,
+}
+
+/// PTY exit event for notification
+struct PtyExitEvent {
+    pty_id: String,
+    room_id: String,
 }
 
 /// The main Chaperone runtime
@@ -106,23 +114,40 @@ impl Chaperone {
         let ready = protocol::encode(&ControlMessage::Ready)?;
         stream.write_all(&ready).await?;
 
+        // Channel for PTY exit notifications
+        let (exit_tx, mut exit_rx) = mpsc::channel::<PtyExitEvent>(16);
+
         // Read and handle messages
         loop {
-            // Read length prefix
-            let mut len_buf = [0u8; 4];
-            match stream.read_exact(&mut len_buf).await {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
+            tokio::select! {
+                biased;
+
+                // Handle PTY exit events (check first)
+                Some(event) = exit_rx.recv() => {
+                    // Send PtyDetached notification
+                    let detach = protocol::encode(&ControlMessage::PtyDetached {
+                        pty_id: event.pty_id.clone(),
+                        room_id: event.room_id,
+                    })?;
+                    let _ = stream.write_all(&detach).await;
+
+                    // Clean up handle
+                    if let Some(handle) = self.ptys.remove(&event.pty_id) {
+                        let _ = std::fs::remove_file(&handle.socket_path);
+                    }
+                }
+
+                // Handle control messages
+                result = read_control_message(&mut stream) => {
+                    match result {
+                        Ok(msg) => {
+                            self.handle_message(msg, &mut stream, &exit_tx).await?;
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                        Err(e) => return Err(e.into()),
+                    }
+                }
             }
-            let len = u32::from_le_bytes(len_buf) as usize;
-
-            // Read payload
-            let mut payload = vec![0u8; len];
-            stream.read_exact(&mut payload).await?;
-
-            let msg = protocol::decode(&payload)?;
-            self.handle_message(msg, &mut stream).await?;
         }
 
         Ok(())
@@ -133,6 +158,7 @@ impl Chaperone {
         &mut self,
         msg: ControlMessage,
         stream: &mut UnixStream,
+        exit_tx: &mpsc::Sender<PtyExitEvent>,
     ) -> Result<()> {
         match msg {
             ControlMessage::SpawnPty {
@@ -181,14 +207,23 @@ impl Chaperone {
                                     PtyHandle {
                                         pty,
                                         socket_path: socket_path.clone(),
+                                        room_id: room_id.clone(),
                                     },
                                 );
 
-                                // Spawn task to run socket server
+                                // Spawn task to run socket server (notifies on exit)
+                                let exit_tx = exit_tx.clone();
+                                let exit_pty_id = pty_id.clone();
+                                let exit_room_id = room_id.clone();
                                 tokio::spawn(async move {
                                     if let Err(e) = pty_socket.run(history, output_rx, input_tx).await {
                                         eprintln!("bzc: PTY socket error: {}", e);
                                     }
+                                    // Notify that PTY has exited
+                                    let _ = exit_tx.send(PtyExitEvent {
+                                        pty_id: exit_pty_id,
+                                        room_id: exit_room_id,
+                                    }).await;
                                 });
 
                                 // Spawn task to handle input from socket -> PTY
@@ -250,4 +285,18 @@ impl Drop for Chaperone {
         let socket_path = self.control_socket_path();
         let _ = std::fs::remove_file(&socket_path);
     }
+}
+
+/// Read a control message from stream
+async fn read_control_message(stream: &mut UnixStream) -> std::io::Result<ControlMessage> {
+    // Read length prefix
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).await?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+
+    // Read payload
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload).await?;
+
+    protocol::decode(&payload).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }

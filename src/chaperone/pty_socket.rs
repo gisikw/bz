@@ -121,9 +121,18 @@ async fn handle_client(
             let msg = DaemonMessage::Output { pty_id: 0, data };
             if let Ok(encoded) = encode(&msg) {
                 if write_half.write_all(&encoded).await.is_err() {
-                    break;
+                    return; // Client disconnected
                 }
             }
+        }
+
+        // output_rx closed = PTY exited - notify client
+        let exit_msg = DaemonMessage::PtyExited {
+            pty_id: 0,
+            exit_code: None,
+        };
+        if let Ok(encoded) = encode(&exit_msg) {
+            let _ = write_half.write_all(&encoded).await;
         }
     });
 
