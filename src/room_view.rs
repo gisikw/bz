@@ -2,6 +2,8 @@
 //!
 //! Each room has multiple screens: chat (screen 0) + PTYs (screens 1..n).
 
+use color_eyre::eyre::Result;
+
 use crate::chaperone_channel::ChaperoneChannel;
 use crate::chat_view::ChatState;
 use crate::picker::HasNameActivity;
@@ -262,5 +264,64 @@ impl RoomView {
                 state.has_unread = false;
             }
         }
+    }
+
+    /// Handle screen focus change within this room
+    ///
+    /// Disconnects the old screen's PTY (if any) and connects the new screen's PTY (if any).
+    pub async fn handle_screen_focus_change(
+        &mut self,
+        old_screen: usize,
+        new_screen: usize,
+    ) -> Result<()> {
+        // Disconnect old screen if it's a PTY
+        if let Some(Screen::Pty(channel)) = self.screens.get_mut(old_screen) {
+            channel.disconnect();
+        }
+
+        // Connect new screen if it's a PTY
+        if let Some(Screen::Pty(channel)) = self.screens.get_mut(new_screen) {
+            channel.connect().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Called when this room gains focus
+    ///
+    /// Connects the current screen's PTY if applicable.
+    pub async fn on_focus_gained(&mut self) -> Result<()> {
+        if let Some(channel) = self.current_pty_mut() {
+            channel.connect().await?;
+        }
+        Ok(())
+    }
+
+    /// Called when this room loses focus
+    ///
+    /// Disconnects all PTYs in this room.
+    pub fn on_focus_lost(&mut self) {
+        for screen in &mut self.screens {
+            if let Screen::Pty(channel) = screen {
+                channel.disconnect();
+            }
+        }
+    }
+
+    /// Disconnect all PTYs in this room
+    pub fn disconnect_all(&mut self) {
+        for screen in &mut self.screens {
+            if let Screen::Pty(channel) = screen {
+                channel.disconnect();
+            }
+        }
+    }
+
+    /// Connect the current screen's PTY if applicable
+    pub async fn connect_current(&mut self) -> Result<()> {
+        if let Some(channel) = self.current_pty_mut() {
+            channel.connect().await?;
+        }
+        Ok(())
     }
 }

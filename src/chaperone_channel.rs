@@ -43,10 +43,15 @@ pub struct ChaperoneChannel {
     pub command: String,
     /// Working directory
     pub cwd: Option<String>,
-    /// PTY connection
-    connection: ChaperonePtyConnection,
-    /// Terminal emulator state
+    /// PTY socket path (for reconnection)
+    socket_path: PathBuf,
+    /// PTY connection (None when disconnected)
+    connection: Option<ChaperonePtyConnection>,
+    /// Terminal emulator state (preserved across reconnects)
     parser: Parser,
+    /// Current terminal size (for resize on reconnect)
+    rows: u16,
+    cols: u16,
     /// Activity state
     activity: ActivityState,
     /// Scroll offset from bottom
@@ -60,7 +65,7 @@ pub struct ChaperoneChannel {
 }
 
 impl ChaperoneChannel {
-    /// Create a new chaperone channel
+    /// Create a new chaperone channel (starts connected)
     pub async fn new(
         name: String,
         command: String,
@@ -77,8 +82,11 @@ impl ChaperoneChannel {
             name,
             command,
             cwd,
-            connection,
+            socket_path,
+            connection: Some(connection),
             parser: Parser::new(rows, cols, SCROLLBACK_LINES),
+            rows,
+            cols,
             activity: ActivityState::default(),
             scroll_offset: 0,
             status: PtyStatus::Running,
@@ -87,14 +95,108 @@ impl ChaperoneChannel {
         })
     }
 
+    /// Create a new chaperone channel without connecting
+    ///
+    /// Use `connect()` to establish the connection when needed.
+    pub fn new_disconnected(
+        name: String,
+        command: String,
+        cwd: Option<String>,
+        socket_path: PathBuf,
+        rows: u16,
+        cols: u16,
+    ) -> Self {
+        let id = uuid::Uuid::new_v4().to_string();
+
+        Self {
+            id,
+            name,
+            command,
+            cwd,
+            socket_path,
+            connection: None,
+            parser: Parser::new(rows, cols, SCROLLBACK_LINES),
+            rows,
+            cols,
+            activity: ActivityState::default(),
+            scroll_offset: 0,
+            status: PtyStatus::Running,
+            resize_cooldown_until: None,
+            history_complete: false,
+        }
+    }
+
     /// Get the unique ID of this channel
     pub fn id(&self) -> &str {
         &self.id
     }
 
+    /// Check if currently connected to the PTY socket
+    pub fn is_connected(&self) -> bool {
+        self.connection.is_some()
+    }
+
+    /// Connect to the PTY socket
+    ///
+    /// If already connected, this is a no-op.
+    /// On reconnect, history will be replayed through the parser.
+    pub async fn connect(&mut self) -> Result<()> {
+        if self.connection.is_some() {
+            return Ok(());
+        }
+
+        let connection = ChaperonePtyConnection::connect(&self.socket_path).await?;
+        self.connection = Some(connection);
+
+        // Reset history_complete flag - we'll receive history again
+        self.history_complete = false;
+
+        // Send current terminal size to ensure PTY is sized correctly
+        self.send_resize(self.rows, self.cols);
+
+        Ok(())
+    }
+
+    /// Disconnect from the PTY socket
+    ///
+    /// Terminal state (parser) is preserved for when we reconnect.
+    pub fn disconnect(&mut self) {
+        self.connection = None;
+    }
+
+    /// Send resize command if connected
+    fn send_resize(&self, rows: u16, cols: u16) {
+        if let Some(ref conn) = self.connection {
+            let tx = conn.input_tx();
+            let msg = ClientMessage::Resize {
+                pty_id: 0,
+                rows,
+                cols,
+            };
+            let _ = tx.try_send(msg);
+        }
+    }
+
     /// Process any pending messages from the PTY
+    ///
+    /// No-op if disconnected.
     pub fn process_pending(&mut self, is_focused: bool) {
-        while let Some(msg) = self.connection.try_recv() {
+        // Collect all pending messages first to avoid borrow issues
+        let messages: Vec<_> = {
+            let connection = match &mut self.connection {
+                Some(conn) => conn,
+                None => return,
+            };
+
+            let mut msgs = Vec::new();
+            while let Some(msg) = connection.try_recv() {
+                msgs.push(msg);
+            }
+            msgs
+        };
+
+        // Now process them
+        for msg in messages {
             match msg {
                 DaemonMessage::History { data, .. } => {
                     self.parser.process(&data);
@@ -189,6 +291,10 @@ impl ChaperoneChannel {
 
     /// Resize the PTY
     pub fn resize(&mut self, rows: u16, cols: u16) {
+        // Store size for reconnect
+        self.rows = rows;
+        self.cols = cols;
+
         // Update parser size
         self.parser.screen_mut().set_size(rows, cols);
 
@@ -198,24 +304,22 @@ impl ChaperoneChannel {
         }
         self.resize_cooldown_until = Some(Instant::now() + RESIZE_COOLDOWN);
 
-        // Send resize to PTY (fire and forget via channel)
-        let tx = self.connection.input_tx();
-        let msg = ClientMessage::Resize {
-            pty_id: 0,
-            rows,
-            cols,
-        };
-        let _ = tx.try_send(msg);
+        // Send resize to PTY if connected
+        self.send_resize(rows, cols);
     }
 
     /// Write input to the PTY
+    ///
+    /// Silently drops input if disconnected.
     pub fn write(&self, data: &[u8]) {
-        let tx = self.connection.input_tx();
-        let msg = ClientMessage::Input {
-            pty_id: 0,
-            data: data.to_vec(),
-        };
-        let _ = tx.try_send(msg);
+        if let Some(ref conn) = self.connection {
+            let tx = conn.input_tx();
+            let msg = ClientMessage::Input {
+                pty_id: 0,
+                data: data.to_vec(),
+            };
+            let _ = tx.try_send(msg);
+        }
     }
 
     /// Get the terminal screen

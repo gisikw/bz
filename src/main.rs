@@ -171,38 +171,96 @@ impl App {
     }
 
     /// Switch to next room (j/k navigation)
-    fn next_room(&mut self) {
+    async fn next_room(&mut self) {
+        let old_room = self.focused_room;
         self.focused_room = (self.focused_room + 1) % self.rooms.len();
+        let new_room = self.focused_room;
+
+        // Handle PTY connection changes
+        if old_room != new_room {
+            self.rooms[old_room].on_focus_lost();
+            if let Err(e) = self.rooms[new_room].on_focus_gained().await {
+                eprintln!("bz: failed to connect PTY on room switch: {}", e);
+            }
+        }
+
         self.focused_room_mut().clear_current_activity();
     }
 
     /// Switch to previous room
-    fn prev_room(&mut self) {
+    async fn prev_room(&mut self) {
+        let old_room = self.focused_room;
         if self.focused_room == 0 {
             self.focused_room = self.rooms.len() - 1;
         } else {
             self.focused_room -= 1;
         }
+        let new_room = self.focused_room;
+
+        // Handle PTY connection changes
+        if old_room != new_room {
+            self.rooms[old_room].on_focus_lost();
+            if let Err(e) = self.rooms[new_room].on_focus_gained().await {
+                eprintln!("bz: failed to connect PTY on room switch: {}", e);
+            }
+        }
+
         self.focused_room_mut().clear_current_activity();
     }
 
     /// Switch to specific room by index
-    fn switch_to_room(&mut self, idx: usize) {
-        if idx < self.rooms.len() {
+    async fn switch_to_room(&mut self, idx: usize) {
+        if idx < self.rooms.len() && idx != self.focused_room {
+            let old_room = self.focused_room;
             self.focused_room = idx;
+
+            // Handle PTY connection changes
+            self.rooms[old_room].on_focus_lost();
+            if let Err(e) = self.rooms[idx].on_focus_gained().await {
+                eprintln!("bz: failed to connect PTY on room switch: {}", e);
+            }
+
             self.focused_room_mut().clear_current_activity();
         }
     }
 
     /// Navigate to next screen within current room (l key)
-    fn next_screen(&mut self) {
+    async fn next_screen(&mut self) {
+        let old_screen = self.focused_room().current_screen_index();
         self.focused_room_mut().next_screen();
+        let new_screen = self.focused_room().current_screen_index();
+
+        // Handle PTY connection changes
+        if old_screen != new_screen {
+            if let Err(e) = self
+                .focused_room_mut()
+                .handle_screen_focus_change(old_screen, new_screen)
+                .await
+            {
+                eprintln!("bz: failed to handle screen focus change: {}", e);
+            }
+        }
+
         self.focused_room_mut().clear_current_activity();
     }
 
     /// Navigate to previous screen within current room (h key)
-    fn prev_screen(&mut self) {
+    async fn prev_screen(&mut self) {
+        let old_screen = self.focused_room().current_screen_index();
         self.focused_room_mut().prev_screen();
+        let new_screen = self.focused_room().current_screen_index();
+
+        // Handle PTY connection changes
+        if old_screen != new_screen {
+            if let Err(e) = self
+                .focused_room_mut()
+                .handle_screen_focus_change(old_screen, new_screen)
+                .await
+            {
+                eprintln!("bz: failed to handle screen focus change: {}", e);
+            }
+        }
+
         self.focused_room_mut().clear_current_activity();
     }
 
@@ -532,6 +590,13 @@ async fn main() -> Result<()> {
     // Create app with rooms
     let mut app = App::new(rooms, size.width, matrix_client);
 
+    // Disconnect non-focused rooms (lazy connect on focus)
+    for (idx, room) in app.rooms.iter_mut().enumerate() {
+        if idx != app.focused_room {
+            room.disconnect_all();
+        }
+    }
+
     // Run the app
     let result = run(&mut terminal, &mut app, &mut user_chaperone, &mut message_rx).await;
 
@@ -816,7 +881,7 @@ async fn run(
                                         }
                                         KeyCode::Enter => {
                                             if let Some(idx) = picker.selected_index() {
-                                                app.switch_to_room(idx);
+                                                app.switch_to_room(idx).await;
                                             }
                                             app.picker = None;
                                         }
@@ -936,27 +1001,27 @@ async fn run(
                                 match key.code {
                                     // Room navigation (j/k)
                                     KeyCode::Char('j') | KeyCode::Down => {
-                                        app.next_room();
+                                        app.next_room().await;
                                     }
                                     KeyCode::Char('k') | KeyCode::Up => {
-                                        app.prev_room();
+                                        app.prev_room().await;
                                     }
                                     KeyCode::Char('n') => {
-                                        app.next_room();
+                                        app.next_room().await;
                                     }
                                     KeyCode::Char('p') => {
-                                        app.prev_room();
+                                        app.prev_room().await;
                                     }
                                     // Screen navigation (h/l)
                                     KeyCode::Char('h') | KeyCode::Left => {
-                                        app.prev_screen();
+                                        app.prev_screen().await;
                                     }
                                     KeyCode::Char('l') | KeyCode::Right => {
-                                        app.next_screen();
+                                        app.next_screen().await;
                                     }
                                     KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
                                         let idx = (c as usize) - ('1' as usize);
-                                        app.switch_to_room(idx);
+                                        app.switch_to_room(idx).await;
                                     }
                                     KeyCode::Char('/') => {
                                         let mut picker = Picker::new();
@@ -1071,7 +1136,7 @@ async fn run(
                             if app.show_sidebar && mouse.column < SIDEBAR_WIDTH {
                                 let room_idx = mouse.row.saturating_sub(1) as usize;
                                 if room_idx < app.rooms.len() {
-                                    app.switch_to_room(room_idx);
+                                    app.switch_to_room(room_idx).await;
                                 }
                             }
                         }
