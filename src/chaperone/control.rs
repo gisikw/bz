@@ -1,6 +1,10 @@
 //! Control socket handling for the chaperone
 //!
 //! Manages the control socket that bzd uses to send commands.
+//!
+//! Used by bzc binary.
+
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::path::PathBuf;

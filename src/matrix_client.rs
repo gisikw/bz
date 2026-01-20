@@ -3,7 +3,6 @@
 //! Handles user registration, login, and sync with the local Conduit server.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use color_eyre::eyre::{eyre, Result, WrapErr};
 use matrix_sdk::{
@@ -126,6 +125,8 @@ pub struct BzMatrixClient {
     user_id: OwnedUserId,
 }
 
+// Many methods used by bzc binary
+#[allow(dead_code)]
 impl BzMatrixClient {
     /// Get the underlying matrix-sdk Client
     pub fn client(&self) -> &Client {

@@ -50,6 +50,7 @@ pub struct AgentConfig {
     pub mode: String,
     /// Persona description (optional, for future use)
     #[serde(default)]
+    #[allow(dead_code)]
     pub persona: Option<String>,
     /// Default rooms to join (optional)
     #[serde(default)]

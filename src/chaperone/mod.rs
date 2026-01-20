@@ -10,7 +10,12 @@ pub mod protocol;
 pub mod pty;
 pub mod pty_socket;
 
+// Re-exports for bzc binary (not used within lib, but part of public API)
+#[allow(unused_imports)]
 pub use config::{ChaperoneConfig, ChaperoneMode};
+#[allow(unused_imports)]
 pub use control::Chaperone;
+#[allow(unused_imports)]
 pub use pty::{ManagedPty, PtyInfo, PtySpawnConfig};
-pub use pty_socket::{PtySocket, PtyInput};
+#[allow(unused_imports)]
+pub use pty_socket::{PtyInput, PtySocket};

@@ -19,6 +19,8 @@ pub struct ChaperonePtyConnection {
     output_rx: mpsc::Receiver<DaemonMessage>,
 }
 
+// Some methods reserved for future use
+#[allow(dead_code)]
 impl ChaperonePtyConnection {
     /// Connect to a PTY socket
     pub async fn connect(socket_path: &Path) -> Result<Self> {

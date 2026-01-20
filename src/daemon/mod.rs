@@ -1,6 +1,8 @@
 //! Session daemon for bz
 //!
 //! Manages PTY sessions that persist across bz restarts.
+//!
+//! Note: Most of this module is used by the `bzd` binary, not the library.
 
 pub mod conduit;
 pub mod pty_manager;
@@ -26,6 +28,7 @@ use pty_manager::PtyManager;
 use std::process::{Child, Command};
 
 /// Hash the config for change detection
+#[allow(dead_code)]
 fn hash_config(config: &Config) -> u64 {
     let mut hasher = DefaultHasher::new();
     for ch in &config.channel {
@@ -36,7 +39,8 @@ fn hash_config(config: &Config) -> u64 {
     hasher.finish()
 }
 
-/// Session daemon
+/// Session daemon (used by bzd binary)
+#[allow(dead_code)]
 pub struct Daemon {
     /// Session UUID
     session_id: String,
@@ -55,6 +59,7 @@ pub struct Daemon {
 }
 
 /// Tracked agent chaperone process
+#[allow(dead_code)]
 struct AgentProcess {
     /// Agent name
     name: String,
@@ -66,10 +71,12 @@ struct AgentProcess {
     pid_path: PathBuf,
 }
 
+#[allow(dead_code)]
 struct ClientConnection {
     tx: mpsc::Sender<DaemonMessage>,
 }
 
+#[allow(dead_code)]
 impl Daemon {
     /// Create a new daemon for the given config (doesn't spawn PTYs yet)
     pub fn new(config: &Config, rows: u16, cols: u16) -> Result<Self> {
@@ -265,6 +272,7 @@ mode = "{}"
     }
 }
 
+#[allow(dead_code)]
 async fn handle_connection(daemon: Arc<Mutex<Daemon>>, mut stream: UnixStream) -> Result<()> {
     // Read first message (should be Attach or AttachTakeover)
     let msg = read_message(&mut stream).await?;
@@ -411,6 +419,7 @@ async fn handle_connection(daemon: Arc<Mutex<Daemon>>, mut stream: UnixStream) -
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn read_message(stream: &mut UnixStream) -> io::Result<ClientMessage> {
     // Read length prefix
     let mut len_buf = [0u8; 4];
@@ -424,6 +433,7 @@ async fn read_message(stream: &mut UnixStream) -> io::Result<ClientMessage> {
     decode(&payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+#[allow(dead_code)]
 async fn read_message_owned(
     stream: &mut tokio::net::unix::OwnedReadHalf,
 ) -> io::Result<ClientMessage> {
@@ -437,11 +447,13 @@ async fn read_message_owned(
     decode(&payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+#[allow(dead_code)]
 async fn write_message(stream: &mut UnixStream, msg: &DaemonMessage) -> io::Result<()> {
     let encoded = encode(msg).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     stream.write_all(&encoded).await
 }
 
+#[allow(dead_code)]
 async fn write_message_owned(
     stream: &mut tokio::net::unix::OwnedWriteHalf,
     msg: &DaemonMessage,

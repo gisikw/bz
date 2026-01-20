@@ -36,8 +36,10 @@ pub struct ChaperoneChannel {
     /// Unique ID for this channel/PTY
     id: String,
     /// Display name
+    #[allow(dead_code)]
     pub name: String,
     /// Command
+    #[allow(dead_code)]
     pub command: String,
     /// Working directory
     pub cwd: Option<String>,

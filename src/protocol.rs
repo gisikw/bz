@@ -100,6 +100,7 @@ pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>, bincode::Error> {
 }
 
 /// Decode length prefix, returns (length, bytes consumed)
+#[allow(dead_code)]
 pub fn decode_length(buf: &[u8]) -> Option<(usize, usize)> {
     if buf.len() < 4 {
         return None;

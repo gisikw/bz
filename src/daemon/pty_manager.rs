@@ -1,6 +1,10 @@
 //! PTY management for the daemon
 //!
 //! Manages multiple PTYs with output buffering for session persistence.
+//!
+//! Used by bzd binary.
+
+#![allow(dead_code)]
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};

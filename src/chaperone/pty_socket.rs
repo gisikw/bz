@@ -1,6 +1,10 @@
 //! PTY socket handler for chaperone
 //!
 //! Each PTY gets a Unix socket for direct I/O with bz.
+//!
+//! Used by bzc binary.
+
+#![allow(dead_code)]
 
 use std::path::PathBuf;
 

@@ -49,6 +49,8 @@ pub struct ChatState {
     pub has_unread: bool,
 }
 
+// Some methods reserved for future scroll/unread UI
+#[allow(dead_code)]
 impl ChatState {
     /// Create a new empty chat state
     pub fn new() -> Self {

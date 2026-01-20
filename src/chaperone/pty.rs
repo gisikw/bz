@@ -1,6 +1,10 @@
 //! PTY management for the chaperone
 //!
 //! Manages PTYs with output buffering for session persistence.
+//!
+//! Used by bzc binary.
+
+#![allow(dead_code)]
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};

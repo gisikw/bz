@@ -1,4 +1,3 @@
-mod channel;
 mod chaperone;
 mod chaperone_channel;
 mod chaperone_pty;
@@ -15,7 +14,7 @@ mod room_view;
 mod sidebar;
 mod terminal;
 mod user_chaperone;
-use std::io::{self, stdout, IsTerminal, Write};
+use std::io::{self, stdout, IsTerminal};
 use std::net::TcpStream;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -66,7 +65,7 @@ use crate::matrix_client::{AttachedPty, BzMatrixClient};
 use crate::picker::{HasPtyStatus, Picker, PickerWidget};
 use crate::pty::PtyStatus;
 use crate::room_view::RoomView;
-use crate::sidebar::{Sidebar, SIDEBAR_WIDTH};
+use crate::sidebar::SIDEBAR_WIDTH;
 use crate::terminal::TerminalWidget;
 use crate::user_chaperone::UserChaperone;
 
@@ -101,8 +100,6 @@ struct App {
     matrix_client: Option<BzMatrixClient>,
     /// Cached Matrix rooms for sidebar (updated periodically)
     cached_rooms: Vec<(String, String)>,
-    /// Channel name -> room_id mapping
-    channel_room_map: HashMap<String, String>,
 }
 
 impl App {
@@ -111,7 +108,6 @@ impl App {
         rooms: Vec<RoomView>,
         cols: u16,
         matrix_client: Option<BzMatrixClient>,
-        channel_room_map: HashMap<String, String>,
     ) -> Self {
         let show_sidebar = cols >= MOBILE_WIDTH_THRESHOLD;
 
@@ -124,7 +120,6 @@ impl App {
             quit_confirm: false,
             matrix_client,
             cached_rooms: Vec::new(),
-            channel_room_map,
         }
     }
 
@@ -209,16 +204,6 @@ impl App {
     fn prev_screen(&mut self) {
         self.focused_room_mut().prev_screen();
         self.focused_room_mut().clear_current_activity();
-    }
-
-    /// Get room count (for picker)
-    fn room_count(&self) -> usize {
-        self.rooms.len()
-    }
-
-    /// Get room names (for picker)
-    fn room_names(&self) -> Vec<&str> {
-        self.rooms.iter().map(|r| r.name.as_str()).collect()
     }
 
     /// Check if current screen is a PTY (for input routing)
@@ -545,7 +530,7 @@ async fn main() -> Result<()> {
     }
 
     // Create app with rooms
-    let mut app = App::new(rooms, size.width, matrix_client, channel_room_map);
+    let mut app = App::new(rooms, size.width, matrix_client);
 
     // Run the app
     let result = run(&mut terminal, &mut app, &mut user_chaperone, &mut message_rx).await;
@@ -623,7 +608,6 @@ fn render_room_sidebar(
 ) {
     use ratatui::text::{Line, Span};
     use ratatui::widgets::{Block, Borders, List, ListItem};
-    use crate::picker::HasNameActivity;
 
     let items: Vec<ListItem> = rooms
         .iter()

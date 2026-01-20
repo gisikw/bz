@@ -15,6 +15,8 @@ pub enum Screen {
     Pty(ChaperoneChannel),
 }
 
+// Some methods reserved for future use
+#[allow(dead_code)]
 impl Screen {
     /// Create a new chat screen
     pub fn chat() -> Self {
@@ -90,6 +92,8 @@ pub struct RoomView {
     screens: Vec<Screen>,
 }
 
+// Some methods reserved for future use
+#[allow(dead_code)]
 impl RoomView {
     /// Create a new room view with just a chat screen
     pub fn new(room_id: String, name: String) -> Self {

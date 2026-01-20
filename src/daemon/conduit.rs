@@ -1,6 +1,10 @@
 //! Conduit Matrix homeserver lifecycle management
 //!
 //! Manages Conduit as a subprocess of bzd.
+//!
+//! Used by bzd binary and main for config generation.
+
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};

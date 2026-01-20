@@ -1,6 +1,10 @@
 //! Chaperone configuration
 //!
 //! Parses the TOML config file for a chaperone instance.
+//!
+//! Used by bzc binary.
+
+#![allow(dead_code)]
 
 use std::path::Path;
 

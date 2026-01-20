@@ -15,6 +15,7 @@ use bz::chaperone::{Chaperone, ChaperoneConfig, ChaperoneMode};
 use bz::env;
 
 /// Path to agent credentials file
+#[allow(dead_code)]
 fn agent_credentials_path(name: &str) -> PathBuf {
     env::data_dir().join(format!("matrix/agent-{}.json", name))
 }
