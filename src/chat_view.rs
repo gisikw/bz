@@ -8,8 +8,63 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Widget, Wrap},
 };
+
+/// Wrap text to fit within a given width, breaking on word boundaries when possible
+fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current_line = String::new();
+
+    for word in text.split_whitespace() {
+        if current_line.is_empty() {
+            // First word on line - take it even if too long
+            if word.len() > max_width {
+                // Break long word across lines
+                let mut remaining = word;
+                while remaining.len() > max_width {
+                    lines.push(remaining[..max_width].to_string());
+                    remaining = &remaining[max_width..];
+                }
+                current_line = remaining.to_string();
+            } else {
+                current_line = word.to_string();
+            }
+        } else if current_line.len() + 1 + word.len() <= max_width {
+            // Word fits on current line
+            current_line.push(' ');
+            current_line.push_str(word);
+        } else {
+            // Word doesn't fit - start new line
+            lines.push(current_line);
+            if word.len() > max_width {
+                // Break long word across lines
+                let mut remaining = word;
+                while remaining.len() > max_width {
+                    lines.push(remaining[..max_width].to_string());
+                    remaining = &remaining[max_width..];
+                }
+                current_line = remaining.to_string();
+            } else {
+                current_line = word.to_string();
+            }
+        }
+    }
+
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+
+    lines
+}
 
 /// A chat message
 #[derive(Clone, Debug)]
@@ -204,15 +259,37 @@ impl ChatViewWidget<'_> {
                 let time_style = Style::default().fg(Color::DarkGray);
                 let content_style = Style::default().fg(Color::White);
 
-                let line = Line::from(vec![
-                    Span::styled(&msg.timestamp, time_style),
-                    Span::raw(" "),
-                    Span::styled(&msg.sender, sender_style),
-                    Span::raw(": "),
-                    Span::styled(&msg.content, content_style),
-                ]);
+                // Calculate prefix width for wrapping
+                // Format: "HH:MM sender: "
+                let prefix_width = msg.timestamp.len() + 1 + msg.sender.len() + 2;
+                let content_width = (inner.width as usize).saturating_sub(prefix_width);
 
-                ListItem::new(line)
+                // Wrap content if needed
+                let wrapped_lines = wrap_text(&msg.content, content_width.max(10));
+
+                let mut lines: Vec<Line> = Vec::new();
+
+                // First line with full prefix
+                if let Some(first_content) = wrapped_lines.first() {
+                    lines.push(Line::from(vec![
+                        Span::styled(msg.timestamp.clone(), time_style),
+                        Span::raw(" "),
+                        Span::styled(msg.sender.clone(), sender_style),
+                        Span::raw(": "),
+                        Span::styled(first_content.clone(), content_style),
+                    ]));
+                }
+
+                // Continuation lines with padding
+                let padding = " ".repeat(prefix_width);
+                for content_line in wrapped_lines.into_iter().skip(1) {
+                    lines.push(Line::from(vec![
+                        Span::raw(padding.clone()),
+                        Span::styled(content_line, content_style),
+                    ]));
+                }
+
+                ListItem::new(lines)
             })
             .collect();
 
@@ -246,6 +323,7 @@ impl ChatViewWidget<'_> {
 
         let input = Paragraph::new(input_text)
             .style(input_style)
+            .wrap(Wrap { trim: false })
             .block(
                 Block::default()
                     .title(" Message ")
@@ -259,5 +337,46 @@ impl ChatViewWidget<'_> {
             );
 
         input.render(area, buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_wrap_text_short() {
+        let result = wrap_text("hello world", 20);
+        assert_eq!(result, vec!["hello world"]);
+    }
+
+    #[test]
+    fn test_wrap_text_exact_fit() {
+        let result = wrap_text("hello world", 11);
+        assert_eq!(result, vec!["hello world"]);
+    }
+
+    #[test]
+    fn test_wrap_text_needs_wrap() {
+        let result = wrap_text("hello world", 8);
+        assert_eq!(result, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn test_wrap_text_long_word() {
+        let result = wrap_text("supercalifragilisticexpialidocious", 10);
+        assert_eq!(result, vec!["supercalif", "ragilistic", "expialidoc", "ious"]);
+    }
+
+    #[test]
+    fn test_wrap_text_empty() {
+        let result = wrap_text("", 20);
+        assert_eq!(result, vec![""]);
+    }
+
+    #[test]
+    fn test_wrap_text_multiple_lines() {
+        let result = wrap_text("the quick brown fox jumps over the lazy dog", 15);
+        assert_eq!(result, vec!["the quick brown", "fox jumps over", "the lazy dog"]);
     }
 }
