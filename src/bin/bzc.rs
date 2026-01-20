@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use color_eyre::eyre::{eyre, Result};
+use serde::{Deserialize, Serialize};
 use tokio::signal::unix::{signal, SignalKind};
 
 use bz::chaperone::{Chaperone, ChaperoneConfig, ChaperoneMode};
@@ -16,6 +17,36 @@ use bz::env;
 /// Path to agent credentials file
 fn agent_credentials_path(name: &str) -> PathBuf {
     env::data_dir().join(format!("matrix/agent-{}.json", name))
+}
+
+/// Persisted agent state (survives restarts)
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct AgentState {
+    /// Timestamp (Unix ms) of the last message that triggered a dispatch.
+    /// Messages with timestamps <= this are skipped on reconnect.
+    last_dispatch_ts: u64,
+}
+
+impl AgentState {
+    fn path(agent_name: &str) -> PathBuf {
+        env::data_dir().join(format!("matrix/agent-{}-state.json", agent_name))
+    }
+
+    fn load(agent_name: &str) -> Self {
+        let path = Self::path(agent_name);
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, agent_name: &str) {
+        let path = Self::path(agent_name);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, serde_json::to_string(self).unwrap_or_default());
+    }
 }
 
 fn main() -> Result<()> {
@@ -111,6 +142,10 @@ fn main() -> Result<()> {
                         // Start sync loop
                         let mut message_rx = client.start_sync();
 
+                        // Load persisted agent state (tracks last dispatched message)
+                        let mut agent_state = AgentState::load(agent_name);
+                        eprintln!("bzc [{}]: loaded state, last_dispatch_ts={}", agent_name, agent_state.last_dispatch_ts);
+
                         // Track if we should quit
                         let mut should_quit = false;
 
@@ -188,6 +223,13 @@ fn main() -> Result<()> {
                                                     eprintln!("bzc [{}]: failed to send ack: {}", agent_name, e);
                                                 }
                                             } else if let Some(ref cwd) = config.cwd {
+                                                // Skip messages we've already dispatched (prevents duplicates on reconnect)
+                                                if msg.timestamp <= agent_state.last_dispatch_ts {
+                                                    eprintln!("bzc [{}]: skipping already-dispatched message (ts={} <= {})",
+                                                        agent_name, msg.timestamp, agent_state.last_dispatch_ts);
+                                                    continue;
+                                                }
+
                                                 // Invoke wicket with the prompt
                                                 eprintln!("bzc [{}]: invoking wicket in {} with prompt: {}",
                                                     agent_name, cwd, prompt);
@@ -225,6 +267,10 @@ fn main() -> Result<()> {
                                                         if let Err(e) = client.send_message(&msg.room_id, &response).await {
                                                             eprintln!("bzc [{}]: failed to send response: {}", agent_name, e);
                                                         }
+
+                                                        // Update dispatch timestamp after successful response
+                                                        agent_state.last_dispatch_ts = msg.timestamp;
+                                                        agent_state.save(agent_name);
                                                     }
                                                     Err(e) => {
                                                         let err_msg = format!("Failed to invoke wicket: {}", e);
@@ -232,6 +278,9 @@ fn main() -> Result<()> {
                                                         if let Err(e) = client.send_message(&msg.room_id, &err_msg).await {
                                                             eprintln!("bzc [{}]: failed to send error: {}", agent_name, e);
                                                         }
+                                                        // Still update timestamp to avoid retrying failed dispatches
+                                                        agent_state.last_dispatch_ts = msg.timestamp;
+                                                        agent_state.save(agent_name);
                                                     }
                                                 }
                                             } else {
