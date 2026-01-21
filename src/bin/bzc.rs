@@ -235,9 +235,9 @@ fn main() -> Result<()> {
                                                 eprintln!("bzc [{}]: invoking wicket in {} with prompt: {}",
                                                     agent_name, cwd, prompt);
 
-                                                // Send "thinking" indicator
-                                                if let Err(e) = client.send_message(&msg.room_id, "🤔 Thinking...").await {
-                                                    eprintln!("bzc [{}]: failed to send thinking msg: {}", agent_name, e);
+                                                // Start typing indicator
+                                                if let Err(e) = client.send_typing_notice(&msg.room_id, true).await {
+                                                    eprintln!("bzc [{}]: failed to start typing indicator: {}", agent_name, e);
                                                 }
 
                                                 // Spawn wicket synchronously (blocking)
@@ -265,6 +265,9 @@ fn main() -> Result<()> {
                                                             response
                                                         };
 
+                                                        // Stop typing indicator before sending response
+                                                        let _ = client.send_typing_notice(&msg.room_id, false).await;
+
                                                         if let Err(e) = client.send_message(&msg.room_id, &response).await {
                                                             eprintln!("bzc [{}]: failed to send response: {}", agent_name, e);
                                                         }
@@ -276,6 +279,10 @@ fn main() -> Result<()> {
                                                     Err(e) => {
                                                         let err_msg = format!("Failed to invoke wicket: {}", e);
                                                         eprintln!("bzc [{}]: {}", agent_name, err_msg);
+
+                                                        // Stop typing indicator before sending error
+                                                        let _ = client.send_typing_notice(&msg.room_id, false).await;
+
                                                         if let Err(e) = client.send_message(&msg.room_id, &err_msg).await {
                                                             eprintln!("bzc [{}]: failed to send error: {}", agent_name, e);
                                                         }

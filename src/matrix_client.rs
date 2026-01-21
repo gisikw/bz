@@ -490,6 +490,24 @@ impl BzMatrixClient {
         Ok(())
     }
 
+    /// Send a typing indicator to a room
+    ///
+    /// Set `typing` to `true` to show the typing indicator, `false` to clear it.
+    /// The indicator auto-expires after 4 seconds if not cleared manually.
+    pub async fn send_typing_notice(&self, room_id: &str, typing: bool) -> Result<()> {
+        let room_id: OwnedRoomId = room_id.parse().wrap_err("Invalid room ID")?;
+        let room = self
+            .client
+            .get_room(&room_id)
+            .ok_or_else(|| eyre!("Room not found: {}", room_id))?;
+
+        room.typing_notice(typing)
+            .await
+            .wrap_err("Failed to send typing notice")?;
+
+        Ok(())
+    }
+
     /// Get list of joined room names (for sidebar)
     ///
     /// Returns (room_id, display_name) pairs. Display name falls back to room_id
