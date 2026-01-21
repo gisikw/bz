@@ -44,6 +44,8 @@ pub struct ChaperoneChannel {
     status: PtyStatus,
     /// Whether history has been fully received
     history_complete: bool,
+    /// Whether this channel needs a shell respawned (set when PTY exits)
+    needs_respawn: bool,
 }
 
 impl ChaperoneChannel {
@@ -73,6 +75,7 @@ impl ChaperoneChannel {
             scroll_offset: 0,
             status: PtyStatus::Running,
             history_complete: false,
+            needs_respawn: false,
         })
     }
 
@@ -103,6 +106,7 @@ impl ChaperoneChannel {
             scroll_offset: 0,
             status: PtyStatus::Running,
             history_complete: false,
+            needs_respawn: false,
         }
     }
 
@@ -189,6 +193,8 @@ impl ChaperoneChannel {
                 }
                 DaemonMessage::PtyExited { .. } => {
                     self.status = PtyStatus::Exited;
+                    self.needs_respawn = true;
+                    eprintln!("DEBUG: PtyExited received, needs_respawn set to true, cwd={:?}", self.cwd);
                 }
                 _ => {}
             }
@@ -281,6 +287,25 @@ impl ChaperoneChannel {
     /// Scroll to bottom
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
+    }
+
+    /// Check if this channel needs a shell respawned, and get the cwd if so.
+    /// Clears the flag after returning.
+    /// If the channel had no cwd set, falls back to the current working directory.
+    pub fn take_respawn_cwd(&mut self) -> Option<String> {
+        eprintln!("DEBUG take_respawn_cwd: name={}, needs_respawn={}, cwd={:?}", self.name, self.needs_respawn, self.cwd);
+        if self.needs_respawn {
+            self.needs_respawn = false;
+            let result = self.cwd.clone().unwrap_or_else(|| {
+                std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "/tmp".to_string())
+            });
+            eprintln!("DEBUG take_respawn_cwd: returning Some({})", result);
+            Some(result)
+        } else {
+            None
+        }
     }
 }
 

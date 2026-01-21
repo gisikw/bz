@@ -111,6 +111,9 @@ async fn read_task(
 
         // Decode and send
         if let Ok(msg) = decode::<DaemonMessage>(&payload) {
+            if matches!(msg, DaemonMessage::PtyExited { .. }) {
+                eprintln!("DEBUG chaperone_pty: received PtyExited from socket");
+            }
             if output_tx.send(msg).await.is_err() {
                 break;
             }

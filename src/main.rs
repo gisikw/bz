@@ -841,6 +841,75 @@ async fn run(
         // Process any pending PTY output from all channels
         app.process_pending();
 
+        // Check for PTYs that exited and need shell respawn
+        // Collect respawn requests first to avoid borrow issues
+        let respawn_requests: Vec<(usize, String, String, String)> = app
+            .rooms
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(idx, room)| {
+                room.take_respawn_cwd().map(|cwd| {
+                    (idx, room.room_id.clone(), room.name.clone(), cwd)
+                })
+            })
+            .collect();
+
+        // Spawn replacement shells for exited PTYs
+        if !respawn_requests.is_empty() {
+            log(&format!("DEBUG: respawn_requests = {:?}", respawn_requests));
+        }
+        for (room_idx, room_id, room_name, cwd) in respawn_requests {
+            let (cols, rows) = crossterm::terminal::size()?;
+            let pty_height = rows.saturating_sub(1).max(24);
+            let pty_cols = if app.show_sidebar {
+                cols.saturating_sub(SIDEBAR_WIDTH).max(80)
+            } else {
+                cols.max(80)
+            };
+
+            // Spawn a new shell in the same cwd
+            match user_chaperone.spawn_pty(&room_id, Some(&cwd), None, pty_height, pty_cols).await {
+                Ok(socket_path) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+
+                    let shell_cmd = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+                    let pty_count = app.rooms[room_idx].screen_count();
+                    match ChaperoneChannel::new(
+                        format!("{}-{}", room_name, pty_count),
+                        shell_cmd.clone(),
+                        Some(cwd),
+                        socket_path.clone(),
+                        pty_height,
+                        pty_cols,
+                    ).await {
+                        Ok(channel) => {
+                            // Register in Matrix room state
+                            if let Some(ref client) = app.matrix_client {
+                                let pty = AttachedPty {
+                                    pty_id: channel.id().to_string(),
+                                    user_id: client.user_id().to_string(),
+                                    socket: socket_path.display().to_string(),
+                                    command: shell_cmd,
+                                };
+                                if let Err(e) = client.attach_pty(&room_id, pty).await {
+                                    log(&format!("failed to register respawned PTY: {}", e));
+                                }
+                            }
+
+                            // Add PTY to room and switch to it
+                            app.rooms[room_idx].add_pty(channel, true);
+                        }
+                        Err(e) => {
+                            log(&format!("failed to connect to respawned PTY: {}", e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    log(&format!("failed to spawn replacement shell: {}", e));
+                }
+            }
+        }
+
         // Poll for incoming Matrix messages (non-blocking)
         if let Some(ref mut rx) = message_rx {
             while let Ok(msg) = rx.try_recv() {

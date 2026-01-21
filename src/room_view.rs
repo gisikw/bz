@@ -230,6 +230,19 @@ impl RoomView {
         }
     }
 
+    /// Check if any PTY in this room needs a shell respawned.
+    /// Returns the cwd to spawn in, if any. Clears the flag after returning.
+    pub fn take_respawn_cwd(&mut self) -> Option<String> {
+        for screen in &mut self.screens {
+            if let Screen::Pty(channel) = screen {
+                if let Some(cwd) = channel.take_respawn_cwd() {
+                    return Some(cwd);
+                }
+            }
+        }
+        None
+    }
+
     /// Clear activity on current screen
     pub fn clear_current_activity(&mut self) {
         match self.current_screen_mut() {

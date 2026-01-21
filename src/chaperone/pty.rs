@@ -79,14 +79,12 @@ impl ManagedPty {
             })
             .map_err(|e| eyre!("Failed to open PTY: {}", e))?;
 
-        // Parse command string
-        let parts: Vec<&str> = config.command.split_whitespace().collect();
-        let (bin, args) = parts
-            .split_first()
-            .ok_or_else(|| eyre!("Empty command string"))?;
+        // Wrap command in a loop so it respawns on exit
+        // This ensures the PTY is never left in a dead state
+        let wrapped_command = format!("while true; do {}; done", config.command);
 
-        let mut cmd = CommandBuilder::new(bin);
-        cmd.args(args);
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.args(["-c", &wrapped_command]);
         if let Some(dir) = &config.cwd {
             cmd.cwd(dir);
         }
