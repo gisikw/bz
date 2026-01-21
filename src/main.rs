@@ -100,6 +100,8 @@ struct App {
     matrix_client: Option<BzMatrixClient>,
     /// Cached Matrix rooms for sidebar (updated periodically)
     cached_rooms: Vec<(String, String)>,
+    /// Force full terminal clear on next draw (fixes rendering artifacts)
+    needs_clear: bool,
 }
 
 impl App {
@@ -120,6 +122,7 @@ impl App {
             quit_confirm: false,
             matrix_client,
             cached_rooms: Vec::new(),
+            needs_clear: false,
         }
     }
 
@@ -175,6 +178,7 @@ impl App {
             if let Err(e) = self.rooms[new_room].on_focus_gained().await {
                 eprintln!("bz: failed to connect PTY on room switch: {}", e);
             }
+            self.needs_clear = true;
         }
 
         self.focused_room_mut().clear_current_activity();
@@ -196,6 +200,7 @@ impl App {
             if let Err(e) = self.rooms[new_room].on_focus_gained().await {
                 eprintln!("bz: failed to connect PTY on room switch: {}", e);
             }
+            self.needs_clear = true;
         }
 
         self.focused_room_mut().clear_current_activity();
@@ -214,6 +219,7 @@ impl App {
             }
 
             self.focused_room_mut().clear_current_activity();
+            self.needs_clear = true;
         }
     }
 
@@ -232,6 +238,7 @@ impl App {
             {
                 eprintln!("bz: failed to handle screen focus change: {}", e);
             }
+            self.needs_clear = true;
         }
 
         self.focused_room_mut().clear_current_activity();
@@ -252,6 +259,7 @@ impl App {
             {
                 eprintln!("bz: failed to handle screen focus change: {}", e);
             }
+            self.needs_clear = true;
         }
 
         self.focused_room_mut().clear_current_activity();
@@ -687,69 +695,88 @@ fn render_room_sidebar(
 
     let mut items: Vec<ListItem> = vec![divider, header];
 
-    items.extend(rooms.iter().enumerate().map(|(i, room)| {
-            let is_focused = i == focused;
-            let activity = room.activity();
+    use crate::pty::ActivityState;
+    use ratatui::text::Text;
 
-            // Build room line with focus indicator
-            let prefix = if is_focused {
-                " \u{25B8} ".to_string() // ▸
-            } else {
-                "   ".to_string()
-            };
+    for (i, room) in rooms.iter().enumerate() {
+        let is_focused = i == focused;
+        let activity = room.activity();
+        let screen_count = room.screen_count();
+        let current_screen = room.current_screen_index();
 
-            // Screen indicator
-            let screen_idx = room.current_screen_index();
-            let screen_count = room.screen_count();
-            let screen_info = if screen_count > 1 {
-                format!(" [{}/{}]", screen_idx + 1, screen_count)
-            } else {
-                String::new()
-            };
+        // Build room line with focus indicator
+        let prefix = if is_focused {
+            " \u{25B8} ".to_string() // ▸
+        } else {
+            "   ".to_string()
+        };
 
-            let mut spans = vec![
-                Span::styled(
-                    prefix,
-                    if is_focused {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        Style::default()
-                    },
-                ),
-                Span::styled(
-                    "#",
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::raw(&room.name),
-                Span::styled(
-                    screen_info,
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ];
+        let mut room_spans = vec![
+            Span::styled(
+                prefix,
+                if is_focused {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default()
+                },
+            ),
+            Span::styled("#", Style::default().fg(Color::DarkGray)),
+            Span::raw(&room.name),
+        ];
 
-            // Activity indicator
-            use crate::pty::ActivityState;
-            if activity == ActivityState::Active {
-                spans.push(Span::styled(
-                    " \u{25CF}".to_string(), // ●
-                    Style::default().fg(Color::Yellow),
-                ));
+        // Activity indicator on room line
+        if activity == ActivityState::Active {
+            room_spans.push(Span::styled(
+                " \u{25CF}".to_string(), // ●
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+
+        let room_style = if is_focused {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else if activity == ActivityState::Active {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        // Build multi-line item if room has multiple screens
+        if screen_count > 1 && is_focused {
+            let mut lines = vec![Line::from(room_spans).style(room_style)];
+
+            // Add screen indicator lines
+            for screen_idx in 0..screen_count {
+                let is_current = screen_idx == current_screen;
+                let screen_prefix = if is_current { "   \u{25B8} " } else { "     " };
+                let (emoji, label) = if screen_idx == 0 {
+                    ("\u{1F4AC}", "chat") // 💬
+                } else {
+                    ("\u{1F5A5}\u{FE0F}", "workspace") // 🖥️
+                };
+
+                let screen_style = if is_current {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+
+                lines.push(
+                    Line::from(vec![
+                        Span::styled(screen_prefix, screen_style),
+                        Span::styled(format!("{} {}", emoji, label), screen_style),
+                    ])
+                );
             }
 
-            let style = if is_focused {
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else if activity == ActivityState::Active {
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-
-            ListItem::new(Line::from(spans)).style(style)
-        }));
+            items.push(ListItem::new(Text::from(lines)));
+        } else {
+            items.push(ListItem::new(Line::from(room_spans)).style(room_style));
+        }
+    }
 
     let version = concat!(" bz v", env!("CARGO_PKG_VERSION"), " ");
     let block = Block::default()
@@ -1148,6 +1175,11 @@ async fn run(
 
             // Render at regular intervals
             _ = render_interval.tick() => {
+                // Force full clear if needed (fixes rendering artifacts on room/screen switch)
+                if app.needs_clear {
+                    terminal.clear()?;
+                    app.needs_clear = false;
+                }
                 terminal.draw(|frame| {
                     let main_area = if app.show_sidebar {
                         let h_chunks = Layout::default()

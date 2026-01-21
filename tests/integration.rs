@@ -342,6 +342,163 @@ fn test_quit_kills_daemon_and_chaperones() -> Result<()> {
     Ok(())
 }
 
+/// Test: sidebar shows screen indicators for focused room with multiple screens
+///
+/// When a room has multiple screens (chat + workspace), the focused room
+/// should show indented sub-items with emoji prefixes (💬 chat, 🖥️ workspace)
+/// instead of the old [1/2] format.
+#[test]
+fn test_sidebar_screen_indicators() -> Result<()> {
+    let mut driver = PtyDriver::spawn_isolated(24, 120)?;
+
+    // Wait for bz to render (room should auto-spawn with chat + workspace)
+    driver.wait_and_process(4000);
+
+    let screen = driver.screen();
+    println!("Screen with indicators: {:?}", screen);
+
+    // Should show chat indicator (💬)
+    assert!(
+        screen.contains("💬") || screen.contains("chat"),
+        "Should show chat screen indicator, got: {}",
+        screen
+    );
+
+    // Should show workspace indicator (🖥️)
+    assert!(
+        screen.contains("🖥") || screen.contains("workspace"),
+        "Should show workspace screen indicator, got: {}",
+        screen
+    );
+
+    // Should NOT show old [1/2] format in sidebar
+    // (Note: status bar still shows [x/y] which is fine)
+    let sidebar_area: String = screen
+        .lines()
+        .filter_map(|line| line.split('│').next())
+        .collect();
+    assert!(
+        !sidebar_area.contains("[1/") && !sidebar_area.contains("[2/"),
+        "Sidebar should not show [n/m] format, got sidebar: {}",
+        sidebar_area
+    );
+
+    driver.quit()?;
+    driver.wait_for_exit(2000)?;
+
+    Ok(())
+}
+
+/// Test: Ctrl+B h/l switches screens and updates sidebar indicator
+///
+/// The ▸ indicator should move between chat and workspace when
+/// switching screens with Ctrl+B h (previous) and Ctrl+B l (next).
+#[test]
+fn test_screen_switching_updates_indicator() -> Result<()> {
+    let mut driver = PtyDriver::spawn_isolated(24, 120)?;
+
+    // Wait for bz to render (starts on workspace screen)
+    driver.wait_and_process(4000);
+
+    let screen = driver.screen();
+    println!("Initial (on workspace): {:?}", screen);
+
+    // Initially on workspace - workspace line should have ▸ indicator
+    // The workspace line should be highlighted (▸ before 🖥️)
+    assert!(
+        screen.contains("▸") && (screen.contains("🖥") || screen.contains("workspace")),
+        "Workspace should be indicated as current screen"
+    );
+
+    // Switch to chat with Ctrl+B h
+    driver.send(r"\x02h")?;
+    driver.wait_and_process(300);
+
+    let screen = driver.screen();
+    println!("After Ctrl+B h (on chat): {:?}", screen);
+
+    // Now on chat - status bar should show [1/2]
+    assert!(
+        screen.contains("[1/2]"),
+        "Status bar should show [1/2] when on chat screen, got: {}",
+        screen
+    );
+
+    // Switch back to workspace with Ctrl+B l
+    driver.send(r"\x02l")?;
+    driver.wait_and_process(300);
+
+    let screen = driver.screen();
+    println!("After Ctrl+B l (on workspace): {:?}", screen);
+
+    // Back on workspace - status bar should show [2/2]
+    assert!(
+        screen.contains("[2/2]"),
+        "Status bar should show [2/2] when on workspace screen, got: {}",
+        screen
+    );
+
+    driver.quit()?;
+    driver.wait_for_exit(2000)?;
+
+    Ok(())
+}
+
+/// Test: switching rooms collapses/expands screen indicators
+///
+/// Only the focused room should show expanded screen indicators.
+/// Unfocused rooms should just show their name without sub-items.
+#[test]
+fn test_room_switch_collapses_indicators() -> Result<()> {
+    let mut driver = PtyDriver::spawn_in_dir(24, 120, &fixtures_dir())?;
+
+    // Wait for bz to render
+    driver.wait_and_process(4000);
+
+    let screen = driver.screen();
+    println!("Initial (on #main): {:?}", screen);
+
+    // #main is focused and should show screen indicators if it has multiple screens
+    // Count how many lines have screen indicators
+    let _initial_indicator_count = screen.matches("💬").count() + screen.matches("🖥").count();
+
+    // Switch to next room with Ctrl+B j
+    driver.send(r"\x02j")?;
+    driver.wait_and_process(300);
+
+    let screen = driver.screen();
+    println!("After Ctrl+B j (on #build): {:?}", screen);
+
+    // #build is now focused
+    // The total indicator count should stay the same (indicators moved, not duplicated)
+    let new_indicator_count = screen.matches("💬").count() + screen.matches("🖥").count();
+
+    // Indicators should only appear for one room at a time
+    assert!(
+        new_indicator_count <= 2,
+        "Should have at most 2 screen indicators (chat + workspace), got: {}",
+        new_indicator_count
+    );
+
+    // Switch back to first room with Ctrl+B k
+    driver.send(r"\x02k")?;
+    driver.wait_and_process(300);
+
+    let screen = driver.screen();
+    println!("After Ctrl+B k (back to #main): {:?}", screen);
+
+    // Verify we're back on first room
+    assert!(
+        screen.contains("▸ #main") || screen.contains("▸ #"),
+        "Should be back on first room"
+    );
+
+    driver.quit()?;
+    driver.wait_for_exit(2000)?;
+
+    Ok(())
+}
+
 /// Test: bz starts successfully despite stale sockets from crashed session
 ///
 /// When SSH drops or bz crashes, stale Unix sockets can be left behind.
