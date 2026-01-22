@@ -456,10 +456,22 @@ async fn main() -> Result<()> {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "stop" => {
+                if let Some(socket_path) = daemon::find_session() {
+                    daemon::stop_session(&socket_path)?;
+                    eprintln!("Stopped bzd daemon");
+                } else {
+                    eprintln!("No running bz session found");
+                }
+                return Ok(());
+            }
             "--help" | "-h" => {
                 println!("bz - Multi-agent coordination TUI");
                 println!();
-                println!("Usage: bz [OPTIONS]");
+                println!("Usage: bz [OPTIONS] [COMMAND]");
+                println!();
+                println!("Commands:");
+                println!("  stop             Stop the running daemon");
                 println!();
                 println!("Options:");
                 println!("  --config <path>  Use specific config file");
