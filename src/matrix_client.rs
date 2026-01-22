@@ -10,13 +10,15 @@ use matrix_sdk::{
     ruma::{
         api::client::{
             account::register::v3::Request as RegistrationRequest,
+            receipt::create_receipt::v3::ReceiptType,
             uiaa::{AuthData, Dummy},
         },
         events::{
+            receipt::ReceiptThread,
             room::message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent},
             StateEventType,
         },
-        OwnedDeviceId, OwnedRoomId, OwnedUserId,
+        OwnedDeviceId, OwnedEventId, OwnedRoomId, OwnedUserId,
     },
     Client, Room,
 };
@@ -28,6 +30,8 @@ use tokio::sync::mpsc;
 pub struct MatrixMessage {
     /// Room ID the message was sent to
     pub room_id: String,
+    /// Event ID of this message
+    pub event_id: String,
     /// Sender user ID
     pub sender: String,
     /// Sender display name (if available)
@@ -447,6 +451,7 @@ impl BzMatrixClient {
 
                     let msg = MatrixMessage {
                         room_id: room.room_id().to_string(),
+                        event_id: event.event_id.to_string(),
                         sender: event.sender.to_string(),
                         sender_display_name,
                         content,
@@ -504,6 +509,25 @@ impl BzMatrixClient {
         room.typing_notice(typing)
             .await
             .wrap_err("Failed to send typing notice")?;
+
+        Ok(())
+    }
+
+    /// Send a read receipt for a message
+    ///
+    /// This marks the message as read by this user.
+    pub async fn send_read_receipt(&self, room_id: &str, event_id: &str) -> Result<()> {
+        let room_id: OwnedRoomId = room_id.parse().wrap_err("Invalid room ID")?;
+        let event_id: OwnedEventId = event_id.parse().wrap_err("Invalid event ID")?;
+
+        let room = self
+            .client
+            .get_room(&room_id)
+            .ok_or_else(|| eyre!("Room not found: {}", room_id))?;
+
+        room.send_single_receipt(ReceiptType::Read, ReceiptThread::Unthreaded, event_id)
+            .await
+            .wrap_err("Failed to send read receipt")?;
 
         Ok(())
     }

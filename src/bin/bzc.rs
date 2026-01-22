@@ -201,22 +201,44 @@ fn main() -> Result<()> {
                                         }
                                     } else {
                                         // Check for @mentions
-                                        // Match @agentname or @agentname:server patterns
-                                        let mention_simple = format!("@{}", agent_name);
+                                        // Match multiple mention formats:
+                                        // 1. @agentname or @agentname:server (standard Matrix)
+                                        // 2. "agentname: " at start (Element desktop tab-complete)
+                                        //    May include emoji suffix like "sam ⚡️:"
+                                        let mention_at = format!("@{}", agent_name);
+                                        let content_lower = content.to_lowercase();
 
-                                        let is_mentioned = content.contains(&mention_simple)
-                                            || content.to_lowercase().contains(&mention_simple.to_lowercase());
+                                        // Check for display name mention at start of message
+                                        // Element uses "Name: message" or "Name ⚡️: message" format
+                                        let display_name_prefix = content.find(':').and_then(|colon_pos| {
+                                            let prefix = content[..colon_pos].trim();
+                                            // Check if prefix starts with agent name (handles "sam" or "sam ⚡️")
+                                            if prefix.to_lowercase().starts_with(&agent_name.to_lowercase()) {
+                                                Some(colon_pos)
+                                            } else {
+                                                None
+                                            }
+                                        });
+
+                                        let is_mentioned = content_lower.contains(&mention_at.to_lowercase())
+                                            || display_name_prefix.is_some();
 
                                         if is_mentioned {
                                             eprintln!("bzc [{}]: @mentioned in {}: {}",
                                                 agent_name, msg.room_id, content);
 
-                                            // Extract the prompt (message without the @mention)
-                                            let prompt = content
-                                                .replace(&mention_simple, "")
-                                                .replace(&mention_simple.to_lowercase(), "")
-                                                .trim()
-                                                .to_string();
+                                            // Extract the prompt (message without the mention)
+                                            let prompt = if let Some(colon_pos) = display_name_prefix {
+                                                // Remove "displayname: " prefix
+                                                content[colon_pos + 1..].trim().to_string()
+                                            } else {
+                                                // Remove @mention
+                                                content
+                                                    .replace(&mention_at, "")
+                                                    .replace(&mention_at.to_lowercase(), "")
+                                                    .trim()
+                                                    .to_string()
+                                            };
 
                                             if prompt.is_empty() {
                                                 let ack = "👋 You mentioned me! What can I help with?";
@@ -231,14 +253,19 @@ fn main() -> Result<()> {
                                                     continue;
                                                 }
 
-                                                // Invoke wicket with the prompt
-                                                eprintln!("bzc [{}]: invoking wicket in {} with prompt: {}",
-                                                    agent_name, cwd, prompt);
+                                                // Send read receipt to acknowledge we've seen the message
+                                                if let Err(e) = client.send_read_receipt(&msg.room_id, &msg.event_id).await {
+                                                    eprintln!("bzc [{}]: failed to send read receipt: {}", agent_name, e);
+                                                }
 
                                                 // Start typing indicator
                                                 if let Err(e) = client.send_typing_notice(&msg.room_id, true).await {
                                                     eprintln!("bzc [{}]: failed to start typing indicator: {}", agent_name, e);
                                                 }
+
+                                                // Invoke wicket with the prompt
+                                                eprintln!("bzc [{}]: invoking wicket in {} with prompt: {}",
+                                                    agent_name, cwd, prompt);
 
                                                 // Spawn wicket synchronously (blocking)
                                                 // -c = continue (maintain conversation context)
@@ -250,47 +277,36 @@ fn main() -> Result<()> {
                                                     .current_dir(cwd)
                                                     .output();
 
-                                                match output {
+                                                let response = match output {
                                                     Ok(out) => {
-                                                        let response = if out.status.success() {
+                                                        if out.status.success() {
                                                             String::from_utf8_lossy(&out.stdout).to_string()
                                                         } else {
                                                             format!("Error: {}", String::from_utf8_lossy(&out.stderr))
-                                                        };
-
-                                                        // Truncate if too long
-                                                        let response = if response.len() > 4000 {
-                                                            format!("{}... (truncated)", &response[..4000])
-                                                        } else {
-                                                            response
-                                                        };
-
-                                                        // Stop typing indicator before sending response
-                                                        let _ = client.send_typing_notice(&msg.room_id, false).await;
-
-                                                        if let Err(e) = client.send_message(&msg.room_id, &response).await {
-                                                            eprintln!("bzc [{}]: failed to send response: {}", agent_name, e);
                                                         }
-
-                                                        // Update dispatch timestamp after successful response
-                                                        agent_state.last_dispatch_ts = msg.timestamp;
-                                                        agent_state.save(agent_name);
                                                     }
                                                     Err(e) => {
-                                                        let err_msg = format!("Failed to invoke wicket: {}", e);
-                                                        eprintln!("bzc [{}]: {}", agent_name, err_msg);
-
-                                                        // Stop typing indicator before sending error
-                                                        let _ = client.send_typing_notice(&msg.room_id, false).await;
-
-                                                        if let Err(e) = client.send_message(&msg.room_id, &err_msg).await {
-                                                            eprintln!("bzc [{}]: failed to send error: {}", agent_name, e);
-                                                        }
-                                                        // Still update timestamp to avoid retrying failed dispatches
-                                                        agent_state.last_dispatch_ts = msg.timestamp;
-                                                        agent_state.save(agent_name);
+                                                        format!("Failed to invoke wicket: {}", e)
                                                     }
+                                                };
+
+                                                // Truncate if too long
+                                                let response = if response.len() > 4000 {
+                                                    format!("{}... (truncated)", &response[..4000])
+                                                } else {
+                                                    response
+                                                };
+
+                                                // Stop typing indicator before sending response
+                                                let _ = client.send_typing_notice(&msg.room_id, false).await;
+
+                                                if let Err(e) = client.send_message(&msg.room_id, &response).await {
+                                                    eprintln!("bzc [{}]: failed to send response: {}", agent_name, e);
                                                 }
+
+                                                // Update dispatch timestamp after successful response
+                                                agent_state.last_dispatch_ts = msg.timestamp;
+                                                agent_state.save(agent_name);
                                             } else {
                                                 let err_msg = "No working directory configured - can't invoke wicket";
                                                 eprintln!("bzc [{}]: {}", agent_name, err_msg);
