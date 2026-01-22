@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use color_eyre::eyre::{eyre, Result, WrapErr};
 use matrix_sdk::{
     config::SyncSettings,
+    room::MessagesOptions,
     ruma::{
         api::client::{
             account::register::v3::Request as RegistrationRequest,
@@ -16,7 +17,7 @@ use matrix_sdk::{
         events::{
             receipt::ReceiptThread,
             room::message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent},
-            StateEventType,
+            AnyMessageLikeEvent, AnyTimelineEvent, MessageLikeEvent, StateEventType,
         },
         OwnedDeviceId, OwnedEventId, OwnedRoomId, OwnedUserId,
     },
@@ -530,6 +531,77 @@ impl BzMatrixClient {
             .wrap_err("Failed to send read receipt")?;
 
         Ok(())
+    }
+
+    /// Get historical messages for a room
+    ///
+    /// Returns messages in chronological order (oldest first).
+    /// Fetches up to `limit` messages going backwards from the current point.
+    pub async fn get_room_history(&self, room_id: &str, limit: u32) -> Result<Vec<MatrixMessage>> {
+        let room_id: OwnedRoomId = room_id.parse().wrap_err("Invalid room ID")?;
+        let room = self
+            .client
+            .get_room(&room_id)
+            .ok_or_else(|| eyre!("Room not found: {}", room_id))?;
+
+        let options = MessagesOptions::backward().from(None);
+        let messages = room
+            .messages(options)
+            .await
+            .wrap_err("Failed to fetch room messages")?;
+
+        let mut result = Vec::new();
+
+        for event in messages.chunk.into_iter().take(limit as usize) {
+            // Deserialize the timeline event
+            let Ok(timeline_event) = event.event.deserialize() else {
+                continue;
+            };
+
+            // Extract message content from timeline events
+            let AnyTimelineEvent::MessageLike(msg_event) = timeline_event else {
+                continue;
+            };
+
+            let AnyMessageLikeEvent::RoomMessage(room_msg) = msg_event else {
+                continue;
+            };
+
+            // Get the original event (not redacted)
+            let MessageLikeEvent::Original(original) = room_msg else {
+                continue;
+            };
+
+            // Extract text content
+            let content = match &original.content.msgtype {
+                MessageType::Text(text) => text.body.clone(),
+                MessageType::Notice(notice) => notice.body.clone(),
+                MessageType::Emote(emote) => format!("* {}", emote.body),
+                _ => continue,
+            };
+
+            // Get sender display name
+            let sender_display_name = room
+                .get_member(&original.sender)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|m| m.display_name().map(|s| s.to_string()));
+
+            result.push(MatrixMessage {
+                room_id: room_id.to_string(),
+                event_id: original.event_id.to_string(),
+                sender: original.sender.to_string(),
+                sender_display_name,
+                content,
+                timestamp: original.origin_server_ts.as_secs().into(),
+            });
+        }
+
+        // Reverse to get chronological order (oldest first)
+        result.reverse();
+
+        Ok(result)
     }
 
     /// Get list of joined room names (for sidebar)

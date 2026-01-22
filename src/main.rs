@@ -171,6 +171,67 @@ impl App {
         }
     }
 
+    /// Load historical messages for a room if not already loaded
+    async fn load_room_history(&mut self, room_idx: usize) {
+        use crate::chat_view::ChatMessage;
+
+        // Get room info
+        let Some(room) = self.rooms.get(room_idx) else {
+            return;
+        };
+
+        // Check if history already loaded
+        let history_loaded = room.chat_state().map(|s| s.history_loaded).unwrap_or(true);
+        if history_loaded {
+            return;
+        }
+
+        let room_id = room.room_id.clone();
+
+        // Fetch history from Matrix
+        let Some(client) = &self.matrix_client else {
+            return;
+        };
+
+        match client.get_room_history(&room_id, 50).await {
+            Ok(messages) => {
+                // Get the user ID to determine own messages
+                let own_user_id = client.user_id().to_string();
+
+                // Convert to ChatMessages
+                let chat_messages: Vec<ChatMessage> = messages
+                    .into_iter()
+                    .map(|msg| {
+                        let sender_name = msg.sender_display_name.unwrap_or_else(|| {
+                            msg.sender
+                                .trim_start_matches('@')
+                                .split(':')
+                                .next()
+                                .unwrap_or(&msg.sender)
+                                .to_string()
+                        });
+                        let timestamp = chrono::DateTime::from_timestamp(msg.timestamp as i64, 0)
+                            .map(|dt| dt.format("%H:%M").to_string())
+                            .unwrap_or_else(|| "??:??".to_string());
+                        let is_own = msg.sender == own_user_id;
+                        ChatMessage::new(sender_name, msg.content, timestamp, is_own)
+                    })
+                    .collect();
+
+                // Prepend to existing messages
+                if let Some(chat_state) = self.rooms[room_idx].chat_state_mut() {
+                    let existing = std::mem::take(&mut chat_state.messages);
+                    chat_state.messages = chat_messages;
+                    chat_state.messages.extend(existing);
+                    chat_state.history_loaded = true;
+                }
+            }
+            Err(e) => {
+                crate::log::log(&format!("Failed to load history for {}: {}", room_id, e));
+            }
+        }
+    }
+
     /// Get reference to the focused room (channel or agent DM)
     fn focused_room(&self) -> &RoomView {
         if let Some(agent_idx) = self.focused_agent {
@@ -324,6 +385,9 @@ impl App {
                 self.focused_room = idx;
             }
 
+            // Load historical messages if not already loaded
+            self.load_room_history(idx).await;
+
             self.focused_room_mut().clear_current_activity();
         }
     }
@@ -346,6 +410,8 @@ impl App {
                 self.needs_clear = true;
             }
             self.focused_agent = Some(agent_idx);
+            // Load historical messages if not already loaded
+            self.load_room_history(dm_idx).await;
             self.focused_room_mut().clear_current_activity();
             return;
         }
@@ -370,6 +436,8 @@ impl App {
                     }
                     self.focused_agent = Some(agent_idx);
                     self.needs_clear = true;
+                    // Load historical messages for the new DM
+                    self.load_room_history(new_idx).await;
                     self.focused_room_mut().clear_current_activity();
                 }
                 Err(e) => {
@@ -781,6 +849,9 @@ async fn main() -> Result<()> {
             room.disconnect_all();
         }
     }
+
+    // Load history for the initially focused room
+    app.load_room_history(app.focused_room).await;
 
     // Run the app
     let result = run(&mut terminal, &mut app, &mut user_chaperone, &mut message_rx).await;

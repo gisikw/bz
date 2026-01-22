@@ -102,6 +102,8 @@ pub struct ChatState {
     pub scroll_offset: usize,
     /// Whether there are unread messages
     pub has_unread: bool,
+    /// Whether historical messages have been loaded
+    pub history_loaded: bool,
 }
 
 // Some methods reserved for future scroll/unread UI
