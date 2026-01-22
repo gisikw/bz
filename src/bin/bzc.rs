@@ -154,6 +154,11 @@ fn main() -> Result<()> {
                         loop {
                             tokio::select! {
                                 Some(msg) = message_rx.recv() => {
+                                    // Skip messages from ourselves (prevents self-triggering loops)
+                                    if msg.sender == client.user_id().as_str() {
+                                        continue;
+                                    }
+
                                     let sender_name = msg.sender_display_name.clone()
                                         .unwrap_or_else(|| msg.sender.clone());
 
@@ -200,7 +205,10 @@ fn main() -> Result<()> {
                                             }
                                         }
                                     } else {
-                                        // Check for @mentions
+                                        // Check if this is a DM - respond to all messages in DMs
+                                        let is_dm = client.is_dm_room(&msg.room_id).await;
+
+                                        // Check for @mentions in channel messages
                                         // Match multiple mention formats:
                                         // 1. @agentname or @agentname:server (standard Matrix)
                                         // 2. "agentname: " at start (Element desktop tab-complete)
@@ -223,12 +231,21 @@ fn main() -> Result<()> {
                                         let is_mentioned = content_lower.contains(&mention_at.to_lowercase())
                                             || display_name_prefix.is_some();
 
-                                        if is_mentioned {
-                                            eprintln!("bzc [{}]: @mentioned in {}: {}",
-                                                agent_name, msg.room_id, content);
+                                        // Respond if it's a DM or if we're mentioned in a channel
+                                        if is_dm || is_mentioned {
+                                            if is_dm {
+                                                eprintln!("bzc [{}]: DM in {}: {}",
+                                                    agent_name, msg.room_id, content);
+                                            } else {
+                                                eprintln!("bzc [{}]: @mentioned in {}: {}",
+                                                    agent_name, msg.room_id, content);
+                                            }
 
-                                            // Extract the prompt (message without the mention)
-                                            let prompt = if let Some(colon_pos) = display_name_prefix {
+                                            // Extract the prompt (message without the mention for channel messages)
+                                            let prompt = if is_dm {
+                                                // In DMs, use the full message as prompt
+                                                content.trim().to_string()
+                                            } else if let Some(colon_pos) = display_name_prefix {
                                                 // Remove "displayname: " prefix
                                                 content[colon_pos + 1..].trim().to_string()
                                             } else {

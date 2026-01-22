@@ -569,6 +569,49 @@ impl BzMatrixClient {
         Ok(response.room_id().to_string())
     }
 
+    /// Get or create a DM room with the given user
+    ///
+    /// Returns the room ID of the DM room (existing or newly created).
+    pub async fn get_or_create_dm(&self, user_id: &str) -> Result<String> {
+        use matrix_sdk::ruma::api::client::room::create_room::v3::Request as CreateRoomRequest;
+
+        let target_user: OwnedUserId = user_id.parse().wrap_err("Invalid user ID")?;
+
+        // Check existing rooms for a DM with this user
+        for room in self.client.rooms() {
+            if room.is_direct().await.unwrap_or(false) {
+                // Check if the target user is a member
+                if let Ok(Some(_member)) = room.get_member(&target_user).await {
+                    return Ok(room.room_id().to_string());
+                }
+            }
+        }
+
+        // No existing DM found, create one
+        let mut request = CreateRoomRequest::new();
+        request.is_direct = true;
+        request.invite = vec![target_user];
+
+        let response = self
+            .client
+            .create_room(request)
+            .await
+            .wrap_err_with(|| format!("Failed to create DM with '{}'", user_id))?;
+
+        Ok(response.room_id().to_string())
+    }
+
+    /// Check if a room is a direct message room
+    pub async fn is_dm_room(&self, room_id: &str) -> bool {
+        let Ok(room_id) = room_id.parse::<OwnedRoomId>() else {
+            return false;
+        };
+        let Some(room) = self.client.get_room(&room_id) else {
+            return false;
+        };
+        room.is_direct().await.unwrap_or(false)
+    }
+
     /// Ensure rooms exist for the given channel names
     ///
     /// Creates rooms that don't exist, returns mapping of name -> room_id.

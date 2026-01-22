@@ -1,13 +1,12 @@
-//! Room picker overlay
+//! Room and agent picker overlay
 //!
-//! A floating picker for quick room switching, modeled after Slack's Cmd+K.
+//! A floating picker for quick room/agent switching, modeled after Slack's Cmd+K.
 //!
 //! Default display (empty query):
-//! - Rooms with bells (sorted by count, highest first)
-//! - Rooms with activity
-//! - Other rooms hidden until you type
+//! - Rooms with activity (sorted by name)
+//! - All agents (sorted by name)
 //!
-//! When typing: fuzzy filter across ALL rooms
+//! When typing: fuzzy filter across both rooms and agents
 
 use ratatui::{
     buffer::Buffer,
@@ -22,8 +21,18 @@ use crate::pty::{ActivityState, PtyStatus};
 // UI icons (pure Unicode for maximum compatibility)
 const ICON_SEARCH: &str = ">";
 const ICON_CHANNEL: &str = "#";
+const ICON_AGENT: &str = "@";
 const ICON_SELECTED: &str = "▸";
 const ICON_ACTIVITY: &str = "●";
+
+/// Item in the picker - either a channel or an agent
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PickerItem {
+    /// Channel (room) with index into rooms array
+    Channel(usize),
+    /// Agent with index into agents array
+    Agent(usize),
+}
 
 /// Room picker state
 pub struct Picker {
@@ -31,8 +40,8 @@ pub struct Picker {
     pub query: String,
     /// Currently selected index in filtered list
     pub selected: usize,
-    /// Filtered room indices (into the room list)
-    pub filtered: Vec<usize>,
+    /// Filtered items (channels and agents)
+    pub filtered: Vec<PickerItem>,
 }
 
 impl Picker {
@@ -45,8 +54,8 @@ impl Picker {
         }
     }
 
-    /// Get the currently selected index
-    pub fn selected_index(&self) -> Option<usize> {
+    /// Get the currently selected item
+    pub fn selected_item(&self) -> Option<PickerItem> {
         self.filtered.get(self.selected).copied()
     }
 
@@ -64,26 +73,93 @@ impl Picker {
         }
     }
 
-    /// Update filter for rooms
-    pub fn update_filter_from_rooms(&mut self, rooms: &[crate::room_view::RoomView]) {
+    /// Update filter for both rooms and agents
+    pub fn update_filter<A: HasAgentName>(&mut self, rooms: &[crate::room_view::RoomView], agents: &[A]) {
+        self.filtered.clear();
+
+        // Build set of room indices that are agent DMs (to exclude from channels)
+        let agent_dm_indices: std::collections::HashSet<usize> = agents
+            .iter()
+            .filter_map(|a| a.dm_room_idx())
+            .collect();
+
         if self.query.is_empty() {
-            self.filtered = rooms
+            // Show rooms with activity (excluding agent DMs) + all agents
+            let mut channel_items: Vec<_> = rooms
                 .iter()
                 .enumerate()
-                .filter(|(_, room)| room.activity() == ActivityState::Active)
-                .map(|(i, _)| i)
+                .filter(|(i, room)| room.activity() == ActivityState::Active && !agent_dm_indices.contains(i))
+                .map(|(i, _)| PickerItem::Channel(i))
                 .collect();
 
-            // Sort by name
-            self.filtered.sort_by(|&a, &b| rooms[a].name.cmp(&rooms[b].name));
-        } else {
-            let query_lower = self.query.to_lowercase();
-            self.filtered = rooms
+            // Sort channels by name
+            channel_items.sort_by(|a, b| {
+                let name_a = match a {
+                    PickerItem::Channel(i) => &rooms[*i].name,
+                    _ => "",
+                };
+                let name_b = match b {
+                    PickerItem::Channel(i) => &rooms[*i].name,
+                    _ => "",
+                };
+                name_a.cmp(name_b)
+            });
+
+            // All agents sorted by name
+            let mut agent_items: Vec<_> = agents
                 .iter()
                 .enumerate()
-                .filter(|(_, room)| room.name.to_lowercase().contains(&query_lower))
-                .map(|(i, _)| i)
+                .map(|(i, _)| PickerItem::Agent(i))
                 .collect();
+            agent_items.sort_by(|a, b| {
+                let name_a = match a {
+                    PickerItem::Agent(i) => agents[*i].agent_name(),
+                    _ => "",
+                };
+                let name_b = match b {
+                    PickerItem::Agent(i) => agents[*i].agent_name(),
+                    _ => "",
+                };
+                name_a.cmp(name_b)
+            });
+
+            self.filtered.extend(channel_items);
+            self.filtered.extend(agent_items);
+        } else {
+            let query_lower = self.query.to_lowercase();
+
+            // Filter channels by name (excluding agent DMs)
+            let mut matching: Vec<_> = rooms
+                .iter()
+                .enumerate()
+                .filter(|(i, room)| room.name.to_lowercase().contains(&query_lower) && !agent_dm_indices.contains(i))
+                .map(|(i, _)| PickerItem::Channel(i))
+                .collect();
+
+            // Filter agents by name
+            let agent_matches: Vec<_> = agents
+                .iter()
+                .enumerate()
+                .filter(|(_, agent)| agent.agent_name().to_lowercase().contains(&query_lower))
+                .map(|(i, _)| PickerItem::Agent(i))
+                .collect();
+
+            matching.extend(agent_matches);
+
+            // Sort all by name
+            matching.sort_by(|a, b| {
+                let name_a = match a {
+                    PickerItem::Channel(i) => rooms[*i].name.as_str(),
+                    PickerItem::Agent(i) => agents[*i].agent_name(),
+                };
+                let name_b = match b {
+                    PickerItem::Channel(i) => rooms[*i].name.as_str(),
+                    PickerItem::Agent(i) => agents[*i].agent_name(),
+                };
+                name_a.cmp(name_b)
+            });
+
+            self.filtered = matching;
         }
 
         if self.selected >= self.filtered.len() {
@@ -91,19 +167,6 @@ impl Picker {
         }
     }
 
-    /// Push char for rooms
-    pub fn push_char_from_rooms(&mut self, c: char, rooms: &[crate::room_view::RoomView]) {
-        self.query.push(c);
-        self.selected = 0;
-        self.update_filter_from_rooms(rooms);
-    }
-
-    /// Pop char for rooms
-    pub fn pop_char_from_rooms(&mut self, rooms: &[crate::room_view::RoomView]) {
-        self.query.pop();
-        self.selected = 0;
-        self.update_filter_from_rooms(rooms);
-    }
 }
 
 /// Trait for types that have a name and activity state
@@ -118,23 +181,59 @@ pub trait HasPtyStatus {
     fn pty_status(&self) -> &PtyStatus;
 }
 
+/// Trait for agent entries that have a name
+pub trait HasAgentName {
+    fn agent_name(&self) -> &str;
+    /// Returns the DM room index if the agent has an open DM
+    fn dm_room_idx(&self) -> Option<usize>;
+}
+
 /// Picker widget namespace for factory methods
 pub struct PickerWidget;
 
 impl PickerWidget {
-    /// Create picker widget for rooms
-    pub fn from_rooms<'a>(picker: &'a Picker, rooms: &'a [crate::room_view::RoomView]) -> RoomPickerWidget<'a> {
-        RoomPickerWidget { picker, rooms }
+    /// Create picker widget for rooms and agents
+    pub fn from_rooms_and_agents<'a, A: HasAgentName + HasAgentActivity>(
+        picker: &'a Picker,
+        rooms: &'a [crate::room_view::RoomView],
+        agents: &'a [A],
+    ) -> RoomPickerWidget<'a, A> {
+        RoomPickerWidget { picker, rooms, agents }
     }
 }
 
-/// Picker widget for rooms
-pub struct RoomPickerWidget<'a> {
-    picker: &'a Picker,
-    rooms: &'a [crate::room_view::RoomView],
+/// Trait for checking agent activity (via DM room)
+pub trait HasAgentActivity {
+    fn has_activity(&self, rooms: &[crate::room_view::RoomView]) -> bool;
 }
 
-impl<'a> Widget for RoomPickerWidget<'a> {
+/// Picker widget for rooms and agents
+pub struct RoomPickerWidget<'a, A: HasAgentName + HasAgentActivity = NoAgent> {
+    picker: &'a Picker,
+    rooms: &'a [crate::room_view::RoomView],
+    agents: &'a [A],
+}
+
+/// Placeholder type for no agents
+pub struct NoAgent;
+
+impl HasAgentName for NoAgent {
+    fn agent_name(&self) -> &str {
+        ""
+    }
+
+    fn dm_room_idx(&self) -> Option<usize> {
+        None
+    }
+}
+
+impl HasAgentActivity for NoAgent {
+    fn has_activity(&self, _rooms: &[crate::room_view::RoomView]) -> bool {
+        false
+    }
+}
+
+impl<'a, A: HasAgentName + HasAgentActivity> Widget for RoomPickerWidget<'a, A> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let picker_width = 50.min(area.width.saturating_sub(4));
         let picker_height = 14.min(area.height.saturating_sub(4));
@@ -178,7 +277,7 @@ impl<'a> Widget for RoomPickerWidget<'a> {
                     Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
                 )]
             } else {
-                vec![ListItem::new("   No matching rooms").style(
+                vec![ListItem::new("   No matching items").style(
                     Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
                 )]
             }
@@ -187,8 +286,7 @@ impl<'a> Widget for RoomPickerWidget<'a> {
                 .filtered
                 .iter()
                 .enumerate()
-                .map(|(i, &room_idx)| {
-                    let room = &self.rooms[room_idx];
+                .map(|(i, item)| {
                     let is_selected = i == self.picker.selected;
 
                     let prefix = if is_selected {
@@ -197,13 +295,24 @@ impl<'a> Widget for RoomPickerWidget<'a> {
                         "   ".to_string()
                     };
 
-                    let activity_indicator = if room.activity() == ActivityState::Active {
+                    let (icon, name, has_activity) = match item {
+                        PickerItem::Channel(idx) => {
+                            let room = &self.rooms[*idx];
+                            (ICON_CHANNEL, room.name.as_str(), room.activity() == ActivityState::Active)
+                        }
+                        PickerItem::Agent(idx) => {
+                            let agent = &self.agents[*idx];
+                            (ICON_AGENT, agent.agent_name(), agent.has_activity(self.rooms))
+                        }
+                    };
+
+                    let activity_indicator = if has_activity {
                         format!(" {}", ICON_ACTIVITY)
                     } else {
                         String::new()
                     };
 
-                    let text = format!("{}{}{}{}", prefix, ICON_CHANNEL, room.name, activity_indicator);
+                    let text = format!("{}{}{}{}", prefix, icon, name, activity_indicator);
 
                     let style = if is_selected {
                         Style::default()

@@ -60,9 +60,9 @@ use ratatui::{
 use std::collections::HashMap;
 
 use crate::chaperone_channel::ChaperoneChannel;
-use crate::config::Config;
+use crate::config::{AgentConfig, Config};
 use crate::matrix_client::{AttachedPty, BzMatrixClient};
-use crate::picker::{HasPtyStatus, Picker, PickerWidget};
+use crate::picker::{HasAgentActivity, HasAgentName, HasPtyStatus, Picker, PickerItem, PickerWidget};
 use crate::pty::PtyStatus;
 use crate::room_view::RoomView;
 use crate::sidebar::SIDEBAR_WIDTH;
@@ -82,11 +82,38 @@ pub enum InputMode {
     Leader,
 }
 
+/// Agent entry in sidebar (wraps config + optional DM room reference)
+struct AgentEntry {
+    config: AgentConfig,
+    /// Index into App.rooms once DM is opened
+    dm_room_idx: Option<usize>,
+}
+
+impl HasAgentName for AgentEntry {
+    fn agent_name(&self) -> &str {
+        &self.config.name
+    }
+
+    fn dm_room_idx(&self) -> Option<usize> {
+        self.dm_room_idx
+    }
+}
+
+impl HasAgentActivity for AgentEntry {
+    fn has_activity(&self, rooms: &[RoomView]) -> bool {
+        use crate::pty::ActivityState;
+        self.dm_room_idx
+            .and_then(|i| rooms.get(i))
+            .map(|r| r.activity() == ActivityState::Active)
+            .unwrap_or(false)
+    }
+}
+
 /// Application state
 struct App {
     /// All rooms (each with chat + PTY screens)
     rooms: Vec<RoomView>,
-    /// Index of the currently focused room
+    /// Index of the currently focused room (in channels)
     focused_room: usize,
     /// Current input mode
     input_mode: InputMode,
@@ -102,6 +129,12 @@ struct App {
     cached_rooms: Vec<(String, String)>,
     /// Force full terminal clear on next draw (fixes rendering artifacts)
     needs_clear: bool,
+    /// Configured agents for DM section
+    agents: Vec<AgentEntry>,
+    /// Currently focused agent (None = in channels section, Some = agent DM focused)
+    focused_agent: Option<usize>,
+    /// Matrix server name for building user IDs
+    server_name: String,
 }
 
 impl App {
@@ -110,6 +143,8 @@ impl App {
         rooms: Vec<RoomView>,
         cols: u16,
         matrix_client: Option<BzMatrixClient>,
+        agents: Vec<AgentEntry>,
+        server_name: String,
     ) -> Self {
         let show_sidebar = cols >= MOBILE_WIDTH_THRESHOLD;
 
@@ -123,6 +158,9 @@ impl App {
             matrix_client,
             cached_rooms: Vec::new(),
             needs_clear: false,
+            agents,
+            focused_agent: None,
+            server_name,
         }
     }
 
@@ -133,20 +171,41 @@ impl App {
         }
     }
 
-    /// Get reference to the focused room
+    /// Get reference to the focused room (channel or agent DM)
     fn focused_room(&self) -> &RoomView {
+        if let Some(agent_idx) = self.focused_agent {
+            if let Some(dm_idx) = self.agents.get(agent_idx).and_then(|a| a.dm_room_idx) {
+                return &self.rooms[dm_idx];
+            }
+        }
         &self.rooms[self.focused_room]
     }
 
-    /// Get mutable reference to the focused room
+    /// Get mutable reference to the focused room (channel or agent DM)
     fn focused_room_mut(&mut self) -> &mut RoomView {
+        if let Some(agent_idx) = self.focused_agent {
+            if let Some(dm_idx) = self.agents.get(agent_idx).and_then(|a| a.dm_room_idx) {
+                return &mut self.rooms[dm_idx];
+            }
+        }
         &mut self.rooms[self.focused_room]
+    }
+
+    /// Get the index of the currently focused room
+    fn focused_room_idx(&self) -> usize {
+        if let Some(agent_idx) = self.focused_agent {
+            if let Some(dm_idx) = self.agents.get(agent_idx).and_then(|a| a.dm_room_idx) {
+                return dm_idx;
+            }
+        }
+        self.focused_room
     }
 
     /// Process pending PTY output for all rooms
     fn process_pending(&mut self) {
+        let focused_idx = self.focused_room_idx();
         for (idx, room) in self.rooms.iter_mut().enumerate() {
-            let is_focused = idx == self.focused_room;
+            let is_focused = idx == focused_idx;
             room.process_pending(is_focused);
         }
     }
@@ -166,60 +225,157 @@ impl App {
         }
     }
 
-    /// Switch to next room (j/k navigation)
-    async fn next_room(&mut self) {
-        let old_room = self.focused_room;
-        self.focused_room = (self.focused_room + 1) % self.rooms.len();
-        let new_room = self.focused_room;
-
-        // Handle PTY connection changes
-        if old_room != new_room {
-            self.rooms[old_room].on_focus_lost();
-            if let Err(e) = self.rooms[new_room].on_focus_gained().await {
-                eprintln!("bz: failed to connect PTY on room switch: {}", e);
-            }
-            self.needs_clear = true;
-        }
-
-        self.focused_room_mut().clear_current_activity();
+    /// Get indices of rooms that are channels (not agent DMs)
+    fn channel_indices(&self) -> Vec<usize> {
+        self.rooms
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !self.agents.iter().any(|a| a.dm_room_idx == Some(*i)))
+            .map(|(i, _)| i)
+            .collect()
     }
 
-    /// Switch to previous room
-    async fn prev_room(&mut self) {
-        let old_room = self.focused_room;
-        if self.focused_room == 0 {
-            self.focused_room = self.rooms.len() - 1;
+    /// Get agents sorted alphabetically, returning (sorted_position, original_index)
+    fn sorted_agents(&self) -> Vec<(usize, usize)> {
+        let mut indexed: Vec<_> = self.agents.iter().enumerate().collect();
+        indexed.sort_by(|a, b| a.1.config.name.cmp(&b.1.config.name));
+        indexed.into_iter().enumerate().map(|(pos, (idx, _))| (pos, idx)).collect()
+    }
+
+    /// Total navigable items (channels + agents)
+    fn nav_item_count(&self) -> usize {
+        self.channel_indices().len() + self.agents.len()
+    }
+
+    /// Current navigation position (0 = first channel, channels.len() = first agent)
+    fn nav_position(&self) -> usize {
+        let channels = self.channel_indices();
+        if let Some(agent_idx) = self.focused_agent {
+            // Find position in sorted agents
+            let sorted = self.sorted_agents();
+            let agent_pos = sorted.iter().find(|(_, idx)| *idx == agent_idx).map(|(pos, _)| *pos).unwrap_or(0);
+            channels.len() + agent_pos
         } else {
-            self.focused_room -= 1;
+            // Find position in channels
+            channels.iter().position(|&i| i == self.focused_room).unwrap_or(0)
         }
-        let new_room = self.focused_room;
-
-        // Handle PTY connection changes
-        if old_room != new_room {
-            self.rooms[old_room].on_focus_lost();
-            if let Err(e) = self.rooms[new_room].on_focus_gained().await {
-                eprintln!("bz: failed to connect PTY on room switch: {}", e);
-            }
-            self.needs_clear = true;
-        }
-
-        self.focused_room_mut().clear_current_activity();
     }
 
-    /// Switch to specific room by index
-    async fn switch_to_room(&mut self, idx: usize) {
-        if idx < self.rooms.len() && idx != self.focused_room {
-            let old_room = self.focused_room;
-            self.focused_room = idx;
+    /// Navigate to a specific position in the unified list
+    async fn nav_to_position(&mut self, pos: usize) {
+        let channels = self.channel_indices();
+        let channel_count = channels.len();
 
-            // Handle PTY connection changes
-            self.rooms[old_room].on_focus_lost();
-            if let Err(e) = self.rooms[idx].on_focus_gained().await {
-                eprintln!("bz: failed to connect PTY on room switch: {}", e);
+        if pos < channel_count {
+            // Navigate to channel
+            let room_idx = channels[pos];
+            self.focused_agent = None;
+            self.switch_to_room(room_idx).await;
+        } else {
+            // Navigate to agent
+            let agent_pos = pos - channel_count;
+            let sorted = self.sorted_agents();
+            if let Some((_, real_idx)) = sorted.get(agent_pos) {
+                self.open_agent_dm(*real_idx).await;
+            }
+        }
+    }
+
+    /// Switch to next item (j key) - channels then agents
+    async fn next_room(&mut self) {
+        let count = self.nav_item_count();
+        if count == 0 {
+            return;
+        }
+        let pos = (self.nav_position() + 1) % count;
+        self.nav_to_position(pos).await;
+    }
+
+    /// Switch to previous item (k key) - agents then channels
+    async fn prev_room(&mut self) {
+        let count = self.nav_item_count();
+        if count == 0 {
+            return;
+        }
+        let pos = if self.nav_position() == 0 {
+            count - 1
+        } else {
+            self.nav_position() - 1
+        };
+        self.nav_to_position(pos).await;
+    }
+
+    /// Switch to specific channel by index (not agent DM)
+    async fn switch_to_room(&mut self, idx: usize) {
+        if idx < self.rooms.len() {
+            let old_idx = self.focused_room_idx();
+
+            // Clear agent focus - we're switching to a channel
+            self.focused_agent = None;
+
+            if idx != old_idx {
+                self.rooms[old_idx].on_focus_lost();
+                self.focused_room = idx;
+                if let Err(e) = self.rooms[idx].on_focus_gained().await {
+                    eprintln!("bz: failed to connect PTY on room switch: {}", e);
+                }
+                self.needs_clear = true;
+            } else {
+                self.focused_room = idx;
             }
 
             self.focused_room_mut().clear_current_activity();
-            self.needs_clear = true;
+        }
+    }
+
+    /// Open DM with agent (create if needed) and focus it
+    async fn open_agent_dm(&mut self, agent_idx: usize) {
+        if agent_idx >= self.agents.len() {
+            return;
+        }
+
+        let old_idx = self.focused_room_idx();
+
+        // If already opened, just switch focus
+        if let Some(dm_idx) = self.agents[agent_idx].dm_room_idx {
+            if old_idx != dm_idx {
+                self.rooms[old_idx].on_focus_lost();
+                if let Err(e) = self.rooms[dm_idx].on_focus_gained().await {
+                    eprintln!("bz: failed to connect on agent DM switch: {}", e);
+                }
+                self.needs_clear = true;
+            }
+            self.focused_agent = Some(agent_idx);
+            self.focused_room_mut().clear_current_activity();
+            return;
+        }
+
+        // Create DM room
+        let agent_user_id = format!("@{}:{}", self.agents[agent_idx].config.name, self.server_name);
+
+        if let Some(client) = &self.matrix_client {
+            match client.get_or_create_dm(&agent_user_id).await {
+                Ok(room_id) => {
+                    // Create chat-only RoomView
+                    let room = RoomView::new(room_id, self.agents[agent_idx].config.name.clone());
+                    let new_idx = self.rooms.len();
+                    self.rooms.push(room);
+
+                    self.agents[agent_idx].dm_room_idx = Some(new_idx);
+
+                    // Switch focus
+                    self.rooms[old_idx].on_focus_lost();
+                    if let Err(e) = self.rooms[new_idx].on_focus_gained().await {
+                        eprintln!("bz: failed to connect on new agent DM: {}", e);
+                    }
+                    self.focused_agent = Some(agent_idx);
+                    self.needs_clear = true;
+                    self.focused_room_mut().clear_current_activity();
+                }
+                Err(e) => {
+                    eprintln!("bz: failed to create DM with agent: {}", e);
+                }
+            }
         }
     }
 
@@ -588,8 +744,24 @@ async fn main() -> Result<()> {
         rooms.push(room);
     }
 
-    // Create app with rooms
-    let mut app = App::new(rooms, size.width, matrix_client);
+    // Build agent entries from config
+    let agents: Vec<AgentEntry> = config
+        .agent
+        .iter()
+        .map(|agent_config| AgentEntry {
+            config: agent_config.clone(),
+            dm_room_idx: None,
+        })
+        .collect();
+
+    // Create app with rooms and agents
+    let mut app = App::new(
+        rooms,
+        size.width,
+        matrix_client,
+        agents,
+        config.matrix.server_name.clone(),
+    );
 
     // Disconnect non-focused rooms (lazy connect on focus)
     for (idx, room) in app.rooms.iter_mut().enumerate() {
@@ -669,7 +841,9 @@ fn render_room_sidebar(
     frame: &mut ratatui::Frame,
     area: Rect,
     rooms: &[RoomView],
-    focused: usize,
+    focused_room: usize,
+    agents: &[AgentEntry],
+    focused_agent: Option<usize>,
     _cached_matrix_rooms: &[(String, String)],
 ) {
     use ratatui::text::{Line, Span};
@@ -684,7 +858,7 @@ fn render_room_sidebar(
     ]));
 
     // Section header
-    let header = ListItem::new(Line::from(vec![
+    let channels_header = ListItem::new(Line::from(vec![
         Span::styled(
             " Channels",
             Style::default()
@@ -693,13 +867,19 @@ fn render_room_sidebar(
         ),
     ]));
 
-    let mut items: Vec<ListItem> = vec![divider, header];
+    let mut items: Vec<ListItem> = vec![divider, channels_header];
 
     use crate::pty::ActivityState;
     use ratatui::text::Text;
 
+    // Render channels (skip agent DM rooms)
     for (i, room) in rooms.iter().enumerate() {
-        let is_focused = i == focused;
+        // Skip rooms that are agent DMs
+        if agents.iter().any(|a| a.dm_room_idx == Some(i)) {
+            continue;
+        }
+
+        let is_focused = focused_agent.is_none() && i == focused_room;
         let activity = room.activity();
         let screen_count = room.screen_count();
         let current_screen = room.current_screen_index();
@@ -775,6 +955,78 @@ fn render_room_sidebar(
             items.push(ListItem::new(Text::from(lines)));
         } else {
             items.push(ListItem::new(Line::from(room_spans)).style(room_style));
+        }
+    }
+
+    // Agents section (if there are any agents)
+    if !agents.is_empty() {
+        // Spacer
+        items.push(ListItem::new(Line::from("")));
+
+        // Agents header
+        let agents_header = ListItem::new(Line::from(vec![
+            Span::styled(
+                " Agents",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        items.push(agents_header);
+
+        // Sort agents alphabetically
+        let mut sorted_agents: Vec<_> = agents.iter().enumerate().collect();
+        sorted_agents.sort_by(|a, b| a.1.config.name.cmp(&b.1.config.name));
+
+        for (idx, agent) in sorted_agents {
+            let is_focused = focused_agent == Some(idx);
+
+            // Check activity state from DM room if opened
+            let has_activity = agent.dm_room_idx
+                .and_then(|i| rooms.get(i))
+                .map(|r| r.activity() == ActivityState::Active)
+                .unwrap_or(false);
+
+            let prefix = if is_focused {
+                " \u{25B8} ".to_string() // ▸
+            } else {
+                "   ".to_string()
+            };
+
+            let mut agent_spans = vec![
+                Span::styled(
+                    prefix,
+                    if is_focused {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default()
+                    },
+                ),
+                Span::styled("@", Style::default().fg(Color::DarkGray)),
+                Span::raw(&agent.config.name),
+            ];
+
+            // Activity indicator
+            if has_activity {
+                agent_spans.push(Span::styled(
+                    " \u{25CF}".to_string(), // ●
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+
+            let agent_style = if is_focused {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else if has_activity {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
+            items.push(ListItem::new(Line::from(agent_spans)).style(agent_style));
         }
     }
 
@@ -974,8 +1226,15 @@ async fn run(
                                             app.picker = None;
                                         }
                                         KeyCode::Enter => {
-                                            if let Some(idx) = picker.selected_index() {
-                                                app.switch_to_room(idx).await;
+                                            match picker.selected_item() {
+                                                Some(PickerItem::Channel(idx)) => {
+                                                    app.focused_agent = None;
+                                                    app.switch_to_room(idx).await;
+                                                }
+                                                Some(PickerItem::Agent(idx)) => {
+                                                    app.open_agent_dm(idx).await;
+                                                }
+                                                None => {}
                                             }
                                             app.picker = None;
                                         }
@@ -986,10 +1245,14 @@ async fn run(
                                             picker.move_down();
                                         }
                                         KeyCode::Backspace => {
-                                            picker.pop_char_from_rooms(&app.rooms);
+                                            picker.query.pop();
+                                            picker.selected = 0;
+                                            picker.update_filter(&app.rooms, &app.agents);
                                         }
                                         KeyCode::Char(c) => {
-                                            picker.push_char_from_rooms(c, &app.rooms);
+                                            picker.query.push(c);
+                                            picker.selected = 0;
+                                            picker.update_filter(&app.rooms, &app.agents);
                                         }
                                         _ => {}
                                     }
@@ -1038,7 +1301,7 @@ async fn run(
                                     && key.modifiers.contains(KeyModifiers::CONTROL)
                                 {
                                     let mut picker = Picker::new();
-                                    picker.update_filter_from_rooms(&app.rooms);
+                                    picker.update_filter(&app.rooms, &app.agents);
                                     app.picker = Some(picker);
                                 } else if key.code == KeyCode::Char('\\')
                                     && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -1119,7 +1382,7 @@ async fn run(
                                     }
                                     KeyCode::Char('/') => {
                                         let mut picker = Picker::new();
-                                        picker.update_filter_from_rooms(&app.rooms);
+                                        picker.update_filter(&app.rooms, &app.agents);
                                         app.picker = Some(picker);
                                     }
                                     KeyCode::Char('[') => {
@@ -1259,8 +1522,8 @@ async fn run(
                             ])
                             .split(frame.area());
 
-                        // Render sidebar with rooms
-                        render_room_sidebar(frame, h_chunks[0], &app.rooms, app.focused_room, &app.cached_rooms);
+                        // Render sidebar with rooms and agents
+                        render_room_sidebar(frame, h_chunks[0], &app.rooms, app.focused_room, &app.agents, app.focused_agent, &app.cached_rooms);
 
                         h_chunks[1]
                     } else {
@@ -1366,7 +1629,7 @@ async fn run(
 
                     // Picker overlay
                     if let Some(ref picker) = app.picker {
-                        let picker_widget = PickerWidget::from_rooms(picker, &app.rooms);
+                        let picker_widget = PickerWidget::from_rooms_and_agents(picker, &app.rooms, &app.agents);
                         frame.render_widget(picker_widget, frame.area());
                     }
 
