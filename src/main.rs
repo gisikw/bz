@@ -1643,6 +1643,15 @@ async fn run(
                                 pty.apply_scroll_for_render();
                                 let term_widget = TerminalWidget::new(pty.screen());
                                 frame.render_widget(term_widget, v_chunks[0]);
+
+                                // Position cursor if visible and not scrolled
+                                if !pty.is_scrolled() && !pty.screen().hide_cursor() {
+                                    let (cursor_row, cursor_col) = pty.screen().cursor_position();
+                                    let x = v_chunks[0].x + cursor_col;
+                                    let y = v_chunks[0].y + cursor_row;
+                                    frame.set_cursor_position((x, y));
+                                }
+
                                 pty.reset_scroll_view();
                             }
                         }
