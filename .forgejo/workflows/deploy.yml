@@ -1,0 +1,39 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: nixos
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: nix build .#default
+
+      - name: Configure Attic
+        run: |
+          mkdir -p ~/.config/attic
+          cat > ~/.config/attic/config.toml <<EOF
+          default-server = "forge"
+
+          [servers.forge]
+          endpoint = "$ATTIC_CACHE_URL"
+          token = "$(cat $ATTIC_TOKEN_FILE)"
+          EOF
+
+      - name: Push to Attic
+        run: attic push forge ./result
+
+      - name: Record store path
+        run: readlink -f ./result > store-path.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: store-path
+          path: store-path.txt
+
+      - name: Trigger Refresh
+        run: fort drhorrible refresh '{"capability": "runtime-package"}'
