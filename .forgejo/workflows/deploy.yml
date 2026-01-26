@@ -16,13 +16,13 @@ jobs:
       - name: Configure Attic
         run: |
           mkdir -p ~/.config/attic
-          cat > ~/.config/attic/config.toml <<EOF
-          default-server = "forge"
-
-          [servers.forge]
-          endpoint = "$ATTIC_CACHE_URL"
-          token = "$(cat $ATTIC_TOKEN_FILE)"
-          EOF
+          printf '%s\n' \
+            'default-server = "forge"' \
+            '' \
+            '[servers.forge]' \
+            "endpoint = \"$ATTIC_CACHE_URL\"" \
+            "token = \"$(cat $ATTIC_TOKEN_FILE)\"" \
+            > ~/.config/attic/config.toml
 
       - name: Push to Attic
         run: attic push forge ./result
