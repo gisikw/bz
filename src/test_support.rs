@@ -354,27 +354,61 @@ pub fn unique_session_dir() -> String {
     format!("/tmp/bz-test-{}-{}", pid, count)
 }
 
-/// Find the bz binary (debug build preferred, then release, then PATH)
+/// Find the bz binary (debug build preferred, then release, then exe dir, then PATH)
 pub fn find_bz_binary() -> String {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
 
+    // Try debug build first
     let debug_path = format!("{}/target/debug/bz", manifest_dir);
     if std::path::Path::new(&debug_path).exists() {
         return debug_path;
     }
 
+    // Try release build
     let release_path = format!("{}/target/release/bz", manifest_dir);
     if std::path::Path::new(&release_path).exists() {
         return release_path;
     }
 
+    // Try same directory as test executable (works in Nix sandbox)
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(parent) = exe_path.parent() {
+            let sibling_path = parent.join("bz");
+            if sibling_path.exists() {
+                return sibling_path.display().to_string();
+            }
+        }
+    }
+
+    // Fall back to PATH
     "bz".to_string()
 }
 
 /// Get the directory containing bz binaries
 pub fn binary_dir() -> String {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    format!("{}/target/debug", manifest_dir)
+
+    // Try debug build first
+    let debug_dir = format!("{}/target/debug", manifest_dir);
+    if std::path::Path::new(&format!("{}/bz", debug_dir)).exists() {
+        return debug_dir;
+    }
+
+    // Try release build
+    let release_dir = format!("{}/target/release", manifest_dir);
+    if std::path::Path::new(&format!("{}/bz", release_dir)).exists() {
+        return release_dir;
+    }
+
+    // Fall back to current exe's directory (works in Nix sandbox)
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(parent) = exe_path.parent() {
+            return parent.display().to_string();
+        }
+    }
+
+    // Last resort: just return debug dir and hope for the best
+    debug_dir
 }
 
 /// Parse escape sequences in a string (e.g., \x02 for Ctrl+B, \n for newline)
