@@ -36,4 +36,5 @@ jobs:
           path: store-path.txt
 
       - name: Trigger Refresh
-        run: fort drhorrible refresh '{"capability": "runtime-package"}'
+        run: |
+          fort drhorrible refresh '{"capability": "runtime-package"}'
