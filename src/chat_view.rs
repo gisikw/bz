@@ -104,6 +104,8 @@ pub struct ChatState {
     pub has_unread: bool,
     /// Whether historical messages have been loaded
     pub history_loaded: bool,
+    /// Users currently typing in this room
+    pub typing_users: Vec<String>,
 }
 
 // Some methods reserved for future scroll/unread UI
@@ -172,6 +174,11 @@ impl ChatState {
     /// Check if input is empty
     pub fn input_is_empty(&self) -> bool {
         self.input.is_empty()
+    }
+
+    /// Update the list of users currently typing
+    pub fn set_typing_users(&mut self, users: Vec<String>) {
+        self.typing_users = users;
     }
 }
 
@@ -297,6 +304,30 @@ impl ChatViewWidget<'_> {
 
         let list = List::new(items);
         list.render(inner, buf);
+
+        // Typing indicator at bottom of message area
+        if !self.state.typing_users.is_empty() && !self.state.is_scrolled() {
+            let typing_text = if self.state.typing_users.len() == 1 {
+                format!("{} is typing...", self.state.typing_users[0])
+            } else if self.state.typing_users.len() == 2 {
+                format!(
+                    "{} and {} are typing...",
+                    self.state.typing_users[0], self.state.typing_users[1]
+                )
+            } else {
+                format!("{} people are typing...", self.state.typing_users.len())
+            };
+
+            let typing_area = Rect::new(
+                inner.x,
+                inner.y + inner.height.saturating_sub(1),
+                inner.width.min(typing_text.len() as u16),
+                1,
+            );
+            let typing_widget = Paragraph::new(typing_text)
+                .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC));
+            typing_widget.render(typing_area, buf);
+        }
 
         // Scroll indicator if scrolled up
         if self.state.is_scrolled() {

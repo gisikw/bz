@@ -690,6 +690,7 @@ async fn main() -> Result<()> {
     log(&format!("connecting to Matrix at {}", env::conduit_url()));
     let mut channel_room_map: HashMap<String, String> = HashMap::new();
     let mut message_rx: Option<tokio::sync::mpsc::Receiver<crate::matrix_client::MatrixMessage>> = None;
+    let mut typing_rx: Option<tokio::sync::mpsc::Receiver<crate::matrix_client::TypingUpdate>> = None;
     let matrix_client = match BzMatrixClient::register_or_login(
         &env::conduit_url(),
         "bz-user",
@@ -700,7 +701,9 @@ async fn main() -> Result<()> {
         Ok(client) => {
             log(&format!("Matrix login successful: {}", client.user_id()));
             log("starting Matrix sync");
-            message_rx = Some(client.start_sync());
+            let (msg_rx, typ_rx) = client.start_sync();
+            message_rx = Some(msg_rx);
+            typing_rx = Some(typ_rx);
 
             // Wait briefly for initial sync to populate rooms
             log("waiting 500ms for initial sync");
@@ -854,7 +857,7 @@ async fn main() -> Result<()> {
     app.load_room_history(app.focused_room).await;
 
     // Run the app
-    let result = run(&mut terminal, &mut app, &mut user_chaperone, &mut message_rx).await;
+    let result = run(&mut terminal, &mut app, &mut user_chaperone, &mut message_rx, &mut typing_rx).await;
 
     // Drain any buffered terminal events to prevent them leaking to underlying terminal
     while crossterm::event::poll(Duration::from_millis(0))? {
@@ -1159,6 +1162,7 @@ async fn run(
     app: &mut App,
     user_chaperone: &mut UserChaperone,
     message_rx: &mut Option<tokio::sync::mpsc::Receiver<crate::matrix_client::MatrixMessage>>,
+    typing_rx: &mut Option<tokio::sync::mpsc::Receiver<crate::matrix_client::TypingUpdate>>,
 ) -> Result<()> {
     let mut event_stream = EventStream::new();
     let mut render_interval = tokio::time::interval(Duration::from_millis(16));
@@ -1271,6 +1275,19 @@ async fn run(
                         if !is_focused_chat {
                             chat_state.has_unread = true;
                         }
+                    }
+                }
+            }
+        }
+
+        // Poll for typing indicator updates (non-blocking)
+        if let Some(ref mut rx) = typing_rx {
+            while let Ok(update) = rx.try_recv() {
+                // Find the room and update typing users
+                let room_idx = app.rooms.iter().position(|r| r.room_id == update.room_id);
+                if let Some(idx) = room_idx {
+                    if let Some(chat_state) = app.rooms[idx].chat_state_mut() {
+                        chat_state.set_typing_users(update.typing_users);
                     }
                 }
             }

@@ -140,8 +140,8 @@ fn main() -> Result<()> {
                             }
                         );
 
-                        // Start sync loop
-                        let mut message_rx = client.start_sync();
+                        // Start sync loop (we only need messages, not typing updates)
+                        let (mut message_rx, _typing_rx) = client.start_sync();
 
                         // Load persisted agent state (tracks last dispatched message)
                         let mut agent_state = AgentState::load(agent_name);

@@ -17,6 +17,7 @@ use matrix_sdk::{
         events::{
             receipt::ReceiptThread,
             room::message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent},
+            typing::SyncTypingEvent,
             AnyMessageLikeEvent, AnyTimelineEvent, MessageLikeEvent, StateEventType,
         },
         OwnedDeviceId, OwnedEventId, OwnedRoomId, OwnedUserId,
@@ -41,6 +42,15 @@ pub struct MatrixMessage {
     pub content: String,
     /// Timestamp (Unix milliseconds)
     pub timestamp: u64,
+}
+
+/// Typing indicator update from Matrix
+#[derive(Clone, Debug)]
+pub struct TypingUpdate {
+    /// Room ID where typing is happening
+    pub room_id: String,
+    /// User IDs currently typing (display names if available)
+    pub typing_users: Vec<String>,
 }
 
 /// Custom state event type for attached PTYs
@@ -412,16 +422,17 @@ impl BzMatrixClient {
 
     /// Start the sync loop with message handling
     ///
-    /// Returns a receiver for incoming chat messages.
+    /// Returns receivers for incoming chat messages and typing updates.
     /// The sync runs in the background and updates room state.
-    pub fn start_sync(&self) -> mpsc::Receiver<MatrixMessage> {
-        let (tx, rx) = mpsc::channel(256);
+    pub fn start_sync(&self) -> (mpsc::Receiver<MatrixMessage>, mpsc::Receiver<TypingUpdate>) {
+        let (msg_tx, msg_rx) = mpsc::channel(256);
+        let (typing_tx, typing_rx) = mpsc::channel(64);
         let client = self.client.clone();
         let own_user_id = self.user_id.clone();
 
         // Add event handler for room messages
         client.add_event_handler({
-            let tx = tx.clone();
+            let tx = msg_tx.clone();
             move |event: OriginalSyncRoomMessageEvent, room: Room| {
                 let tx = tx.clone();
                 let own_user_id = own_user_id.clone();
@@ -464,6 +475,39 @@ impl BzMatrixClient {
             }
         });
 
+        // Add event handler for typing indicators
+        client.add_event_handler({
+            let tx = typing_tx.clone();
+            move |event: SyncTypingEvent, room: Room| {
+                let tx = tx.clone();
+                async move {
+                    // Get display names for typing users
+                    let mut typing_users = Vec::new();
+                    for user_id in &event.content.user_ids {
+                        let name = room
+                            .get_member(user_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .and_then(|m| m.display_name().map(|s| s.to_string()))
+                            .unwrap_or_else(|| {
+                                // Fallback: extract local part of Matrix ID
+                                user_id.as_str().trim_start_matches('@').split(':').next()
+                                    .unwrap_or(user_id.as_str()).to_string()
+                            });
+                        typing_users.push(name);
+                    }
+
+                    let update = TypingUpdate {
+                        room_id: room.room_id().to_string(),
+                        typing_users,
+                    };
+
+                    let _ = tx.send(update).await;
+                }
+            }
+        });
+
         // Start sync in background
         tokio::spawn(async move {
             let settings = SyncSettings::default();
@@ -472,7 +516,7 @@ impl BzMatrixClient {
             }
         });
 
-        rx
+        (msg_rx, typing_rx)
     }
 
     /// Get list of joined rooms
