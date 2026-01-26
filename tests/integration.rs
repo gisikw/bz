@@ -20,8 +20,11 @@ fn fixtures_dir() -> String {
 fn test_bz_spawns_shell_and_renders() -> Result<()> {
     let mut driver = PtyDriver::spawn_isolated(24, 120)?;
 
-    // Wait for shell to start and render (daemon + chaperone + Matrix login)
-    driver.wait_and_process(4000);
+    // Wait for TUI to be ready (indicated by status bar)
+    assert!(
+        driver.wait_for_tui_ready(10000),
+        "TUI should become ready within 10 seconds"
+    );
 
     let screen = driver.screen();
     println!("Screen contents: {:?}", screen.trim());
@@ -49,23 +52,23 @@ fn test_bz_spawns_shell_and_renders() -> Result<()> {
 fn test_input_forwarding() -> Result<()> {
     let mut driver = PtyDriver::spawn_isolated(24, 120)?;
 
-    // Wait for shell to start (daemon + chaperone init takes time)
-    driver.wait_and_process(4000);
+    // Wait for TUI to be ready
+    assert!(
+        driver.wait_for_tui_ready(10000),
+        "TUI should become ready"
+    );
 
     // Send "echo test123" followed by Enter
     driver.send("echo test123\r")?;
 
-    // Wait for command output
-    driver.wait_and_process(500);
+    // Wait for command output to appear
+    assert!(
+        driver.wait_for_content("test123", 2000),
+        "Should see command output 'test123'"
+    );
 
     let screen = driver.screen();
     println!("Screen after command: {:?}", screen);
-
-    // The screen should show "test123" (the output of echo)
-    assert!(
-        screen.contains("test123"),
-        "Screen should show command output 'test123'"
-    );
 
     // Process should still be running
     assert!(driver.is_running(), "Process should still be running");
@@ -82,8 +85,11 @@ fn test_input_forwarding() -> Result<()> {
 fn test_tab_switching() -> Result<()> {
     let mut driver = PtyDriver::spawn_in_dir(24, 120, &fixtures_dir())?;
 
-    // Wait for initial render (daemon + chaperone init takes time)
-    driver.wait_and_process(4000);
+    // Wait for TUI to be ready
+    assert!(
+        driver.wait_for_tui_ready(10000),
+        "TUI should become ready"
+    );
 
     let screen = driver.screen();
     println!("Initial screen: {:?}", screen);
@@ -103,7 +109,7 @@ fn test_tab_switching() -> Result<()> {
 
     // Send Ctrl+B n to switch to next channel (build)
     driver.send(r"\x02n")?;
-    driver.wait_and_process(200);
+    driver.wait_and_process(300);
 
     let screen = driver.screen();
     println!("After Ctrl+B n: {:?}", screen);
@@ -117,7 +123,7 @@ fn test_tab_switching() -> Result<()> {
 
     // Send Ctrl+B n again to switch to logs
     driver.send(r"\x02n")?;
-    driver.wait_and_process(200);
+    driver.wait_and_process(300);
 
     let screen = driver.screen();
 
@@ -130,7 +136,7 @@ fn test_tab_switching() -> Result<()> {
 
     // Send Ctrl+B n again (should wrap to main)
     driver.send(r"\x02n")?;
-    driver.wait_and_process(200);
+    driver.wait_and_process(300);
 
     let screen = driver.screen();
 
@@ -153,8 +159,11 @@ fn test_tab_switching() -> Result<()> {
 fn test_activity_detection() -> Result<()> {
     let mut driver = PtyDriver::spawn_in_dir(24, 120, &fixtures_dir())?;
 
-    // Wait for initial render (daemon + chaperone init takes time)
-    driver.wait_and_process(4000);
+    // Wait for TUI to be ready
+    assert!(
+        driver.wait_for_tui_ready(10000),
+        "TUI should become ready"
+    );
 
     let screen = driver.screen();
     println!("Initial screen: {:?}", screen);
@@ -171,7 +180,7 @@ fn test_activity_detection() -> Result<()> {
 
     // Switch to channel 2 'build' (clears its activity)
     driver.send(r"\x02n")?;
-    driver.wait_and_process(200);
+    driver.wait_and_process(300);
 
     let screen = driver.screen();
     println!("On channel 'build': {:?}", screen);
@@ -188,7 +197,7 @@ fn test_activity_detection() -> Result<()> {
 
     // Switch to 'logs' channel
     driver.send(r"\x02n")?;
-    driver.wait_and_process(200);
+    driver.wait_and_process(300);
 
     let screen = driver.screen();
     println!("On channel 'logs': {:?}", screen);
@@ -212,8 +221,11 @@ fn test_sidebar_hides_on_mobile() -> Result<()> {
     // 80 cols is below MOBILE_WIDTH_THRESHOLD (100)
     let mut driver = PtyDriver::spawn_isolated(24, 80)?;
 
-    // Wait for bz to render (daemon + chaperone init takes time)
-    driver.wait_and_process(4000);
+    // Wait for TUI to be ready
+    assert!(
+        driver.wait_for_tui_ready(10000),
+        "TUI should become ready"
+    );
 
     let screen = driver.screen();
     println!("Mobile screen: {:?}", screen);
@@ -251,8 +263,11 @@ fn test_quit_kills_daemon_and_chaperones() -> Result<()> {
     let mut driver = PtyDriver::spawn_in_dir(24, 120, &fixtures_with_agent_dir())?;
     let session_dir = driver.session_dir().unwrap().to_string();
 
-    // Wait for bz to fully start (daemon + chaperones + matrix login)
-    driver.wait_and_process(4000);
+    // Wait for TUI to be ready
+    assert!(
+        driver.wait_for_tui_ready(10000),
+        "TUI should become ready"
+    );
 
     // Verify bz is running
     assert!(driver.is_running(), "bz should be running");
@@ -351,8 +366,11 @@ fn test_quit_kills_daemon_and_chaperones() -> Result<()> {
 fn test_sidebar_screen_indicators() -> Result<()> {
     let mut driver = PtyDriver::spawn_isolated(24, 120)?;
 
-    // Wait for bz to render (room should auto-spawn with chat + workspace)
-    driver.wait_and_process(4000);
+    // Wait for TUI to be ready
+    assert!(
+        driver.wait_for_tui_ready(10000),
+        "TUI should become ready"
+    );
 
     let screen = driver.screen();
     println!("Screen with indicators: {:?}", screen);
@@ -397,8 +415,11 @@ fn test_sidebar_screen_indicators() -> Result<()> {
 fn test_screen_switching_updates_indicator() -> Result<()> {
     let mut driver = PtyDriver::spawn_isolated(24, 120)?;
 
-    // Wait for bz to render (starts on workspace screen)
-    driver.wait_and_process(4000);
+    // Wait for TUI to be ready
+    assert!(
+        driver.wait_for_tui_ready(10000),
+        "TUI should become ready"
+    );
 
     let screen = driver.screen();
     println!("Initial (on workspace): {:?}", screen);
@@ -452,8 +473,11 @@ fn test_screen_switching_updates_indicator() -> Result<()> {
 fn test_room_switch_collapses_indicators() -> Result<()> {
     let mut driver = PtyDriver::spawn_in_dir(24, 120, &fixtures_dir())?;
 
-    // Wait for bz to render
-    driver.wait_and_process(4000);
+    // Wait for TUI to be ready
+    assert!(
+        driver.wait_for_tui_ready(10000),
+        "TUI should become ready"
+    );
 
     let screen = driver.screen();
     println!("Initial (on #main): {:?}", screen);
@@ -536,8 +560,11 @@ fn test_reconnect_cleans_stale_sockets() -> Result<()> {
     // Spawn bz with the pre-setup session directory
     let mut driver = PtyDriver::spawn_with_session_dir(24, 120, session_dir)?;
 
-    // Wait for bz to start (this is where socket cleanup happens)
-    driver.wait_and_process(4000);
+    // Wait for TUI to be ready (this is where socket cleanup happens)
+    assert!(
+        driver.wait_for_tui_ready(10000),
+        "TUI should become ready despite stale sockets"
+    );
 
     // Verify bz is running (meaning it successfully started despite stale sockets)
     assert!(

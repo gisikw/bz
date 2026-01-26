@@ -260,7 +260,6 @@ async fn handle_client(
             // Check if PTY exited
             _ = exit_rx.changed() => {
                 if *exit_rx.borrow() {
-                    eprintln!("DEBUG pty_socket: PTY exited, sending PtyExited to client");
                     // Send PtyExited to client
                     let exit_msg = DaemonMessage::PtyExited {
                         pty_id: 0,
@@ -270,11 +269,7 @@ async fn handle_client(
                         // Try to get write_half back from output_task
                         state.clear_client(); // This will close client_rx
                         if let Ok(mut write_half) = output_task.await {
-                            eprintln!("DEBUG pty_socket: writing PtyExited to client");
                             let _ = write_half.write_all(&encoded).await;
-                            eprintln!("DEBUG pty_socket: PtyExited written");
-                        } else {
-                            eprintln!("DEBUG pty_socket: failed to get write_half from output_task");
                         }
                     }
                     return;

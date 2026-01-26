@@ -687,11 +687,17 @@ async fn main() -> Result<()> {
 
     // Connect to Matrix (Conduit should be running via bzd)
     // TODO: Make homeserver/credentials configurable
-    log(&format!("connecting to Matrix at {}", env::conduit_url()));
+    // Skip Matrix connection if BZ_SKIP_MATRIX is set (useful for tests)
+    let skip_matrix = std::env::var("BZ_SKIP_MATRIX").is_ok();
     let mut channel_room_map: HashMap<String, String> = HashMap::new();
     let mut message_rx: Option<tokio::sync::mpsc::Receiver<crate::matrix_client::MatrixMessage>> = None;
     let mut typing_rx: Option<tokio::sync::mpsc::Receiver<crate::matrix_client::TypingUpdate>> = None;
-    let matrix_client = match BzMatrixClient::register_or_login(
+    let matrix_client = if skip_matrix {
+        log("skipping Matrix connection (BZ_SKIP_MATRIX set)");
+        None
+    } else {
+        log(&format!("connecting to Matrix at {}", env::conduit_url()));
+        match BzMatrixClient::register_or_login(
         &env::conduit_url(),
         "bz-user",
         "bz-password", // TODO: Generate or prompt for password
@@ -755,6 +761,7 @@ async fn main() -> Result<()> {
             eprintln!("bz: Matrix connection failed: {} (continuing without Matrix)", e);
             None
         }
+    }
     };
     log(&format!("Matrix client initialized: {}", matrix_client.is_some()));
 
@@ -1194,9 +1201,6 @@ async fn run(
             .collect();
 
         // Spawn replacement shells for exited PTYs
-        if !respawn_requests.is_empty() {
-            log(&format!("DEBUG: respawn_requests = {:?}", respawn_requests));
-        }
         for (room_idx, room_id, room_name, cwd) in respawn_requests {
             let (cols, rows) = crossterm::terminal::size()?;
             let pty_height = rows.saturating_sub(1).max(24);

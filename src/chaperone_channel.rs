@@ -194,7 +194,6 @@ impl ChaperoneChannel {
                 DaemonMessage::PtyExited { .. } => {
                     self.status = PtyStatus::Exited;
                     self.needs_respawn = true;
-                    eprintln!("DEBUG: PtyExited received, needs_respawn set to true, cwd={:?}", self.cwd);
                 }
                 _ => {}
             }
@@ -293,7 +292,6 @@ impl ChaperoneChannel {
     /// Clears the flag after returning.
     /// If the channel had no cwd set, falls back to the current working directory.
     pub fn take_respawn_cwd(&mut self) -> Option<String> {
-        eprintln!("DEBUG take_respawn_cwd: name={}, needs_respawn={}, cwd={:?}", self.name, self.needs_respawn, self.cwd);
         if self.needs_respawn {
             self.needs_respawn = false;
             let result = self.cwd.clone().unwrap_or_else(|| {
@@ -301,7 +299,6 @@ impl ChaperoneChannel {
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|_| "/tmp".to_string())
             });
-            eprintln!("DEBUG take_respawn_cwd: returning Some({})", result);
             Some(result)
         } else {
             None

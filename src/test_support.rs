@@ -119,6 +119,9 @@ impl PtyDriver {
             cmd.env("BZ_CONDUIT_PORT", v);
         }
 
+        // Skip Matrix connection in tests (much faster and more reliable)
+        cmd.env("BZ_SKIP_MATRIX", "1");
+
         // Set working directory if provided
         if let Some(ref dir) = cwd {
             cmd.cwd(dir);
@@ -185,6 +188,45 @@ impl PtyDriver {
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
+    }
+
+    /// Wait until screen contains specific text, with timeout
+    ///
+    /// Returns true if text was found, false if timeout expired.
+    /// Use this instead of fixed-duration waits to handle timing variations.
+    pub fn wait_for_content(&mut self, needle: &str, timeout_ms: u64) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+        while std::time::Instant::now() < deadline {
+            match self.output_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(data) => self.parser.process(&data),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            if self.parser.screen().contents().contains(needle) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Wait until the TUI is ready (status bar visible)
+    ///
+    /// The status bar contains "^K search" or "^B leader" which indicates
+    /// the TUI has fully initialized and is ready for input.
+    pub fn wait_for_tui_ready(&mut self, timeout_ms: u64) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+        while std::time::Instant::now() < deadline {
+            match self.output_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(data) => self.parser.process(&data),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            let screen = self.parser.screen().contents();
+            if screen.contains("^K search") || screen.contains("^B leader") {
+                return true;
+            }
+        }
+        false
     }
 
     /// Send text to bz (supports escape sequences like \x02 for Ctrl+B)
