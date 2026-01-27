@@ -272,17 +272,30 @@ fn test_quit_kills_daemon_and_chaperones() -> Result<()> {
     // Verify bz is running
     assert!(driver.is_running(), "bz should be running");
 
-    // Find daemon PID
-    let daemon_pid: i32 = std::fs::read_dir(&session_dir)
-        .ok()
-        .and_then(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .find(|e| e.path().extension().map(|x| x == "pid").unwrap_or(false))
-                .and_then(|e| std::fs::read_to_string(e.path()).ok())
-        })
-        .and_then(|s| s.trim().parse().ok())
-        .expect("Daemon PID file should exist");
+    // Find daemon PID (with retry - daemon may take a moment to write PID file after daemonizing)
+    let mut daemon_pid: Option<i32> = None;
+    for _ in 0..20 {
+        daemon_pid = std::fs::read_dir(&session_dir)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .find(|e| e.path().extension().map(|x| x == "pid").unwrap_or(false))
+                    .and_then(|e| std::fs::read_to_string(e.path()).ok())
+            })
+            .and_then(|s| s.trim().parse().ok());
+        if daemon_pid.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let daemon_pid = daemon_pid.unwrap_or_else(|| {
+        // Debug: list session_dir contents
+        let contents: Vec<_> = std::fs::read_dir(&session_dir)
+            .map(|entries| entries.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+            .unwrap_or_default();
+        panic!("Daemon PID file should exist in {}, found: {:?}", session_dir, contents);
+    });
 
     // Find agent PID (in agents subdirectory)
     let agents_dir = format!("{}/agents", session_dir);
