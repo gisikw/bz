@@ -639,12 +639,20 @@ async fn main() -> Result<()> {
             bzd_args.push("--config".to_string());
             bzd_args.push(path.display().to_string());
         }
-        let output = Command::new(&bzd_path)
+        // Build bzd command, explicitly passing BZ_* env vars for test isolation
+        let mut bzd_cmd = Command::new(&bzd_path);
+        bzd_cmd
             .args(&bzd_args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .output();
+            .stderr(Stdio::inherit());
+        // Pass through BZ_* environment variables (important for test isolation)
+        for (key, value) in std::env::vars() {
+            if key.starts_with("BZ_") {
+                bzd_cmd.env(&key, &value);
+            }
+        }
+        let output = bzd_cmd.output();
 
         match output {
             Ok(out) => {
