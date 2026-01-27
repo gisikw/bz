@@ -41,7 +41,7 @@ jobs:
       - name: Record store path
         run: readlink -f ./result > store-path.txt
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v3
         with:
           name: store-path
           path: store-path.txt
