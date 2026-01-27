@@ -27,7 +27,7 @@ jobs:
           attic push fort ./deps-result
 
       - name: Build
-        run: nix build .#default
+        run: nix build .#default -L
 
       - name: Test
         run: |
