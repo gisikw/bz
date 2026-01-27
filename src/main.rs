@@ -645,7 +645,7 @@ async fn main() -> Result<()> {
             .args(&bzd_args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::piped());
         // Pass through BZ_* environment variables (important for test isolation)
         for (key, value) in std::env::vars() {
             if key.starts_with("BZ_") {
@@ -657,9 +657,15 @@ async fn main() -> Result<()> {
         match output {
             Ok(out) => {
                 let socket_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                log(&format!("bzd spawned, socket: '{}', exit status: {:?}", socket_path, out.status));
+                let stderr_out = String::from_utf8_lossy(&out.stderr);
+                log(&format!("bzd spawned, socket: '{}', exit status: {:?}, stderr: {}", socket_path, out.status, stderr_out));
                 if !socket_path.is_empty() {
                     eprintln!("bz: started bzd (socket: {})", socket_path);
+                } else {
+                    eprintln!("bz: bzd returned empty socket path (exit: {:?})", out.status);
+                    if !stderr_out.is_empty() {
+                        eprintln!("bz: bzd stderr: {}", stderr_out.trim());
+                    }
                 }
             }
             Err(e) => {
