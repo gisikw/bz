@@ -24,7 +24,7 @@ jobs:
       - name: Build and cache deps
         run: |
           nix build .#deps -o deps-result
-          attic push forge ./deps-result
+          attic push fort ./deps-result
 
       - name: Build
         run: nix build .#default
@@ -36,7 +36,7 @@ jobs:
           RUST_BACKTRACE: "1"
 
       - name: Push to Attic
-        run: attic push forge ./result
+        run: attic push fort ./result
 
       - name: Record store path
         run: readlink -f ./result > store-path.txt
