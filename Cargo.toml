@@ -59,4 +59,4 @@ path = "src/bin/bz-pty-driver.rs"
 
 [profile.release]
 strip = true
-lto = "thin"
+lto = false
