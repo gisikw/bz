@@ -10,15 +10,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build
-        run: nix build .#default
-
-      - name: Test
-        run: |
-          nix develop -c cargo test
-        env:
-          RUST_BACKTRACE: "1"
-
       - name: Configure Attic
         run: |
           mkdir -p ~/.config/attic
@@ -29,6 +20,20 @@ jobs:
             "endpoint = \"$ATTIC_CACHE_URL\"" \
             "token = \"$(cat $ATTIC_TOKEN_FILE)\"" \
             > ~/.config/attic/config.toml
+
+      - name: Build and cache deps
+        run: |
+          nix build .#deps -o deps-result
+          attic push forge ./deps-result
+
+      - name: Build
+        run: nix build .#default
+
+      - name: Test
+        run: |
+          nix develop -c cargo test
+        env:
+          RUST_BACKTRACE: "1"
 
       - name: Push to Attic
         run: attic push forge ./result

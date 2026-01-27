@@ -45,6 +45,8 @@
         packages = {
           default = bz;
           bz = bz;
+          # Exposed for CI caching - build deps once, reuse across builds
+          deps = cargoArtifacts;
         };
 
         devShells.default = craneLib.devShell {
