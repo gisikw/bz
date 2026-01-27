@@ -38,13 +38,10 @@ jobs:
       - name: Push to Attic
         run: attic push fort ./result
 
-      - name: Record store path
-        run: readlink -f ./result > store-path.txt
-
-      - uses: actions/upload-artifact@v3
-        with:
-          name: store-path
-          path: store-path.txt
+      - name: Register Package
+        run: |
+          STORE_PATH=$(readlink -f ./result)
+          fort drhorrible runtime-package-register "{\"repo\": \"infra/bz\", \"storePath\": \"$STORE_PATH\", \"rev\": \"$GITHUB_SHA\"}"
 
       - name: Trigger Refresh
         run: |
