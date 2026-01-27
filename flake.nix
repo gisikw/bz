@@ -35,8 +35,10 @@
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
         # Build the actual package
+        # Tests disabled - PTY tests can't run in nix sandbox, run via cargo in CI
         bz = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
+          doCheck = false;
         });
       in
       {

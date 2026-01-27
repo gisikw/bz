@@ -13,6 +13,12 @@ jobs:
       - name: Build
         run: nix build .#default
 
+      - name: Test
+        run: |
+          nix develop -c cargo test
+        env:
+          RUST_BACKTRACE: "1"
+
       - name: Configure Attic
         run: |
           mkdir -p ~/.config/attic
