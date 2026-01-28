@@ -374,7 +374,7 @@ fn test_quit_kills_daemon_and_chaperones() -> Result<()> {
 /// Test: sidebar shows screen indicators for focused room with multiple screens
 ///
 /// When a room has multiple screens (chat + workspace), the focused room
-/// should show indented sub-items with emoji prefixes (💬 chat, 🖥️ workspace)
+/// should show indented sub-items with icon prefixes (⌂ chat, ◇ workspace)
 /// instead of the old [1/2] format.
 #[test]
 fn test_sidebar_screen_indicators() -> Result<()> {
@@ -389,16 +389,16 @@ fn test_sidebar_screen_indicators() -> Result<()> {
     let screen = driver.screen();
     println!("Screen with indicators: {:?}", screen);
 
-    // Should show chat indicator (💬)
+    // Should show chat indicator (⌂)
     assert!(
-        screen.contains("💬") || screen.contains("chat"),
+        screen.contains("⌂") || screen.contains("chat"),
         "Should show chat screen indicator, got: {}",
         screen
     );
 
-    // Should show workspace indicator (🖥️)
+    // Should show workspace indicator (◇)
     assert!(
-        screen.contains("🖥") || screen.contains("workspace"),
+        screen.contains("◇") || screen.contains("workspace"),
         "Should show workspace screen indicator, got: {}",
         screen
     );
@@ -439,9 +439,9 @@ fn test_screen_switching_updates_indicator() -> Result<()> {
     println!("Initial (on workspace): {:?}", screen);
 
     // Initially on workspace - workspace line should have ▸ indicator
-    // The workspace line should be highlighted (▸ before 🖥️)
+    // The workspace line should be highlighted (▸ before ◇)
     assert!(
-        screen.contains("▸") && (screen.contains("🖥") || screen.contains("workspace")),
+        screen.contains("▸") && (screen.contains("◇") || screen.contains("workspace")),
         "Workspace should be indicated as current screen"
     );
 
@@ -498,7 +498,7 @@ fn test_room_switch_collapses_indicators() -> Result<()> {
 
     // #main is focused and should show screen indicators if it has multiple screens
     // Count how many lines have screen indicators
-    let _initial_indicator_count = screen.matches("💬").count() + screen.matches("🖥").count();
+    let _initial_indicator_count = screen.matches("⌂").count() + screen.matches("◇").count();
 
     // Switch to next room with Ctrl+B j
     driver.send(r"\x02j")?;
@@ -509,7 +509,7 @@ fn test_room_switch_collapses_indicators() -> Result<()> {
 
     // #build is now focused
     // The total indicator count should stay the same (indicators moved, not duplicated)
-    let new_indicator_count = screen.matches("💬").count() + screen.matches("🖥").count();
+    let new_indicator_count = screen.matches("⌂").count() + screen.matches("◇").count();
 
     // Indicators should only appear for one room at a time
     assert!(

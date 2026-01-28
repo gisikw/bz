@@ -1039,10 +1039,10 @@ fn render_room_sidebar(
             for screen_idx in 0..screen_count {
                 let is_current = screen_idx == current_screen;
                 let screen_prefix = if is_current { "   \u{25B8} " } else { "     " };
-                let (emoji, label) = if screen_idx == 0 {
-                    ("\u{1F4AC}", "chat") // 💬
+                let (icon, label) = if screen_idx == 0 {
+                    ("\u{2302}", "chat") // ⌂
                 } else {
-                    ("\u{1F5A5}\u{FE0F}", "workspace") // 🖥️
+                    ("\u{25C7}", "workspace") // ◇
                 };
 
                 let screen_style = if is_current {
@@ -1054,7 +1054,7 @@ fn render_room_sidebar(
                 lines.push(
                     Line::from(vec![
                         Span::styled(screen_prefix, screen_style),
-                        Span::styled(format!("{} {}", emoji, label), screen_style),
+                        Span::styled(format!("{} {}", icon, label), screen_style),
                     ])
                 );
             }
