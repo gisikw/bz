@@ -275,9 +275,9 @@ impl App {
     fn resize_all(&mut self, rows: u16, cols: u16) {
         let pty_rows = rows.max(24);
         let pty_cols = if self.show_sidebar {
-            cols.saturating_sub(SIDEBAR_WIDTH).max(80)
+            cols.saturating_sub(SIDEBAR_WIDTH)
         } else {
-            cols.max(80)
+            cols
         };
         for room in &mut self.rooms {
             for channel in room.ptys_mut() {
@@ -792,14 +792,14 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Get terminal size (minimum 24x80 to avoid vt100 panics)
+    // Get terminal size (minimum 24 rows to avoid vt100 panics)
     let size = terminal.size()?;
     let pty_height = size.height.saturating_sub(1).max(24);
     let show_sidebar = size.width >= MOBILE_WIDTH_THRESHOLD;
     let pty_cols = if show_sidebar {
-        size.width.saturating_sub(SIDEBAR_WIDTH).max(80)
+        size.width.saturating_sub(SIDEBAR_WIDTH)
     } else {
-        size.width.max(80)
+        size.width
     };
 
     // Create rooms for each channel in config, each with a PTY

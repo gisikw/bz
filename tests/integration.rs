@@ -249,6 +249,51 @@ fn test_sidebar_hides_on_mobile() -> Result<()> {
     Ok(())
 }
 
+/// Test: inner PTY gets correct width on very narrow terminals
+///
+/// This verifies the fix for mobile width issues: the inner PTY should
+/// receive the actual terminal width, not a minimum of 80 columns.
+#[test]
+fn test_narrow_pty_width_propagation() -> Result<()> {
+    // 50 cols - below the old hardcoded minimum of 80
+    let mut driver = PtyDriver::spawn_isolated(24, 50)?;
+
+    // Wait for TUI to be ready
+    assert!(
+        driver.wait_for_tui_ready(10000),
+        "TUI should become ready"
+    );
+
+    // Query the shell's idea of terminal width
+    driver.send("tput cols\r")?;
+
+    // Wait for the output - should contain "50"
+    assert!(
+        driver.wait_for_content("50", 2000),
+        "Inner PTY should see 50 columns, not 80. Screen: {}",
+        driver.screen()
+    );
+
+    let screen = driver.screen();
+    println!("Narrow PTY screen: {:?}", screen);
+
+    // Verify we don't see "80" as the column count
+    // (tput cols output should be "50", not "80")
+    let lines: Vec<&str> = screen.lines().collect();
+    let has_80_as_cols = lines.iter().any(|line| {
+        line.trim() == "80" || line.contains("tput cols") && line.contains("80")
+    });
+    assert!(
+        !has_80_as_cols,
+        "Inner PTY should NOT report 80 columns on a 50-column terminal"
+    );
+
+    driver.quit()?;
+    driver.wait_for_exit(2000)?;
+
+    Ok(())
+}
+
 /// Path to test fixtures with agent directory
 fn fixtures_with_agent_dir() -> String {
     format!("{}/tests/fixtures_with_agent", env!("CARGO_MANIFEST_DIR"))

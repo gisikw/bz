@@ -93,9 +93,37 @@ impl PtyDriver {
             })
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
-        // Build command for bz
+        // Build command for bz with isolated environment
         let mut cmd = CommandBuilder::new(find_bz_binary());
+
+        // Clear inherited environment to ensure complete isolation
+        // This prevents the test's bz from finding the user's daemon
+        cmd.env_clear();
+
+        // Set minimal required environment
         cmd.env("TERM", "xterm-256color");
+
+        // HOME is needed for shell operation and dirs::* functions
+        if let Ok(home) = std::env::var("HOME") {
+            cmd.env("HOME", home);
+        }
+
+        // USER is needed for some shell prompts
+        if let Ok(user) = std::env::var("USER") {
+            cmd.env("USER", user);
+        }
+
+        // SHELL for spawning user's preferred shell
+        if let Ok(shell) = std::env::var("SHELL") {
+            cmd.env("SHELL", shell);
+        }
+
+        // Locale settings for proper UTF-8 handling
+        if let Ok(lang) = std::env::var("LANG") {
+            cmd.env("LANG", lang);
+        } else {
+            cmd.env("LANG", "en_US.UTF-8");
+        }
 
         // Add target/debug to PATH so bz can find bzd
         let path = format!(
@@ -105,7 +133,7 @@ impl PtyDriver {
         );
         cmd.env("PATH", path);
 
-        // Set isolated directories if provided
+        // Set isolated directories - REQUIRED for test isolation
         if let Some(ref dir) = session_dir {
             cmd.env("BZ_SESSION_DIR", dir);
             // Also set BZ_DATA_DIR to isolated location for chaperone sockets
